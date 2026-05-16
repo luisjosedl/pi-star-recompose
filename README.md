@@ -77,8 +77,9 @@ for one-key access.
    `starless` / `stars` / `star_mask`.
 4. Adjust the sliders while watching the preview. Defaults
    `Intensity 200 / Black Point 0 / Boost 1` are a sensible starting
-   point for typical linear stars-only data. The Intensity slider
-   goes up to 1000 for very faint star fields.
+   point for typical linear stars-only data. The Intensity slider is
+   logarithmic and spans 1 to 10000, so you can push very faint stars
+   out of the noise or deliberately blow out bright ones.
 5. (Optional) Tick **Save stretched stars** if you also want the
    processed stars layer as a separate image.
 6. Click **Apply**. A new image (`Combined`) is created with the result.

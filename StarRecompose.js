@@ -67,7 +67,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1"
+#define VERSION       "1.1.7"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -436,18 +436,20 @@ function applyArcsinh( view, intensityUI, blackPoint )
 // 2b. Midtones lift via PixelMath mtf() to compensate for ArcsinhStretch
 //     saturation past a certain stretch value. ArcsinhStretch alone
 //     plateaus around stretch~500 internally (further increases are
-//     numerically present but visually imperceptible). To give the high
-//     end of the slider real perceptible "blow-out", we add an MTF
-//     midtones-lift stage that activates only when the UI value goes
-//     past the default (STRETCH_DEF) and ramps from no effect at
-//     midtones=0.5 to a brutal lift at midtones=0.05 at slider max.
-//     Below the default the function is a no-op so the default preview
-//     looks exactly the same as before this stage was added.
+//     numerically present but visually imperceptible). To give the
+//     high end of the slider real perceptible "blow-out", we add an
+//     MTF midtones-lift stage that activates only when the UI value
+//     goes past the default (STRETCH_DEF). The midtones balance ramps
+//     from 0.5 (no effect) at the default to 0.02 (extreme lift) at
+//     the max, using a sqrt(t) curve so the lift becomes perceptible
+//     soon after leaving the default rather than only at the very top
+//     of the slider.
 function applyMidtonesLift( view, intensityUI )
 {
    if ( intensityUI <= STRETCH_DEF ) return;
    var t = (intensityUI - STRETCH_DEF) / (STRETCH_MAX - STRETCH_DEF);
-   var midtones = 0.5 - t * 0.45;
+   var midtones = 0.5 - Math.sqrt( t ) * 0.48;     // 0.5 -> 0.02
+
    var pm = new PixelMath;
    pm.expression          = "mtf(" + midtones.toFixed( 4 ) + ",$T)";
    pm.useSingleExpression = true;

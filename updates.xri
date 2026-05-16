@@ -21,8 +21,8 @@
       <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.1.5.tar.gz"
-               sha1="01973307fe5ba2360bbf36193c0f93ce04beb4fb"
+      <package fileName="pkg/AstroDL-StarRecompose-1.1.6.tar.gz"
+               sha1="fd4e6d80ac24331f1917cc6eec3414511a46aff5"
                type="script"
                releaseDate="20260516">
          <title>AstroDL - Star Recompose</title>

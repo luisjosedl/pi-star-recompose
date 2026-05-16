@@ -94,7 +94,7 @@
 // multiplier for our own ColorSaturation hat-curve.
 #define STRETCH_MIN          1.0
 #define STRETCH_MAX          1000.0
-#define STRETCH_DEF          200.0
+#define STRETCH_DEF          100.0
 #define STRETCH_INTERNAL_X   5.0
 
 #define BLACK_MIN     0.0
@@ -908,7 +908,7 @@ function CombinerDialog()
 
    this.resetBtn = new PushButton( this );
    this.resetBtn.text    = "Reset";
-   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 200, Black Point 0, Boost 1, no SCNR).";
+   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 100, Black Point 0, Boost 1, no SCNR).";
    this.resetBtn.onClick = function()
    {
       data.stretchIntensity = STRETCH_DEF;
@@ -942,9 +942,10 @@ function CombinerDialog()
    this.stretchNC.toolTip =
       "ArcsinhStretch intensity (Lupton et al. 1999). Linear slider " +
       "from 1 to 1000.\n" +
-      "Default 200 (sensible starting point). Push toward 1000 to " +
-      "fully blow out the brightest star cores; the curve is scaled " +
-      "internally so the high end has real headroom.";
+      "Default 100 (sweet spot: stars clearly visible without blowing " +
+      "out the brightest cores). Push toward 1000 to fully blow out " +
+      "bright stars; the curve is scaled internally so the high end " +
+      "has real headroom.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;
@@ -1142,7 +1143,7 @@ function CombinerDialog()
 
    // Credits line (brand visibility).
    this.creditLabel = new Label( this );
-   this.creditLabel.text = BRAND + " - " + TOOL + " v" + VERSION + " - by luisjosedl - MIT License";
+   this.creditLabel.text = BRAND + " - " + TOOL + " v" + VERSION + " - by Luis Jose DL - MIT License";
    this.creditLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
    this.creditLabel.styleSheet = "QLabel { color: gray; font-size: 8pt; }";
    this.creditLabel.toolTip =

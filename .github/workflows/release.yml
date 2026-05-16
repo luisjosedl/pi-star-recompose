@@ -1,0 +1,78 @@
+name: Release
+
+# Fires every time a tag of the form vX.Y.Z is pushed.
+#   git tag v1.1.0
+#   git push origin v1.1.0
+#
+# It will:
+#   1. Pack StarRecompose.js into a tar.gz that mirrors the PI install
+#      layout (src/scripts/AstroDL/StarRecompose.js).
+#   2. Compute its SHA-1.
+#   3. Rewrite updates.xri with the new fileName + sha1 + release date.
+#   4. Publish updates.xri + the tar.gz to the gh-pages branch (kept
+#      across releases so older versions remain downloadable).
+#
+# After the first successful run, enable GitHub Pages from
+#   Settings > Pages > Source: "Deploy from a branch" > gh-pages / root.
+# Then the PixInsight repository URL is:
+#   https://luisjosedl.github.io/pi-star-recompose/
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .tar.gz with PixInsight install layout
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT_FILE="AstroDL-StarRecompose-${VERSION}.tar.gz"
+
+          # Stage with the path PI uses when extracting an update.
+          mkdir -p stage/src/scripts/AstroDL
+          cp StarRecompose.js stage/src/scripts/AstroDL/
+
+          mkdir -p publish/pkg
+          (cd stage && tar -czf "../publish/pkg/${OUT_FILE}" .)
+
+          SHA1=$(sha1sum "publish/pkg/${OUT_FILE}" | awk '{print $1}')
+          echo "OUT_FILE=${OUT_FILE}" >> "$GITHUB_ENV"
+          echo "OUT_PATH=publish/pkg/${OUT_FILE}" >> "$GITHUB_ENV"
+          echo "SHA1=${SHA1}"         >> "$GITHUB_ENV"
+
+      - name: Rewrite updates.xri (fileName, sha1, date)
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%Y%m%d)            # PI expects YYYYMMDD, no dashes
+          sed -i.bak \
+            -e 's|fileName="[^"]*"|fileName="pkg/'"${OUT_FILE}"'"|' \
+            -e 's|sha1="[0-9a-fA-F]*"|sha1="'"${SHA1}"'"|' \
+            -e 's|releaseDate="[^"]*"|releaseDate="'"${DATE}"'"|' \
+            updates.xri
+          rm updates.xri.bak
+          cp updates.xri publish/
+          # Disable Jekyll on the published Pages branch.
+          touch publish/.nojekyll
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./publish
+          publish_branch: gh-pages
+          keep_files: true
+          commit_message: 'Release v${{ steps.ver.outputs.version }}'

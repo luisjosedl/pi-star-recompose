@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AstroDL - PixInsight repository manifest.
+
+  fileName / sha1 / releaseDate are rewritten automatically by
+  .github/workflows/release.yml every time a tag (vX.Y.Z) is pushed.
+  Title and descriptions are edited by hand when the version changes.
+
+  This manifest is NOT cryptographically signed. PixInsight will show
+  an "untrusted repository" warning during install; users may continue
+  past it.
+-->
+<xri version="1.0">
+   <description>
+      <p><b>AstroDL</b> &mdash; astrophotography tool suite for PixInsight
+      by luisjosedl.</p>
+      <p>Currently includes <b>Star Recompose</b>: recomposes a stretched
+      starless image with a linear stars-only image using an
+      ArcsinhStretch-based engine with live embedded preview, mouse-wheel
+      zoom and pan. MIT License.</p>
+      <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
+   </description>
+   <platform os="all" arch="noarch" version="1.8.8:1.9.3">
+      <package fileName="pkg/AstroDL-StarRecompose-1.1.0.tar.gz"
+               sha1="0000000000000000000000000000000000000000"
+               type="script"
+               releaseDate="20260516">
+         <title>AstroDL - Star Recompose</title>
+         <description>
+            <p>Star Recompose v1.1 &mdash; combines a stretched starless
+            image with a linear stars-only image using PixInsight's native
+            ArcsinhStretch (Lupton 1999) plus a saturation hat-curve and
+            an optional SCNR Green step.</p>
+            <p>Live embedded preview with mouse-wheel zoom and click-drag
+            pan. Optional second output for the stretched stars layer.
+            MIT License.</p>
+         </description>
+      </package>
+   </platform>
+</xri>

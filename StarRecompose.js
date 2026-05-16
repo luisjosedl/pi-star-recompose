@@ -67,7 +67,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.7"
+#define VERSION       "1.1.8"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -84,6 +84,7 @@
 #define ID_STP_SMALL  "__AD_stars_proc"
 #define ID_PV_SMALL   "__AD_preview"
 #define ID_TMP_FULL   "__AD_proc_full"
+#define ID_GLOW       "__AD_glow"
 
 // Slider ranges. STRETCH is shown to the user as 1..1000 (a familiar
 // linear scale) but is multiplied by STRETCH_INTERNAL_X before being
@@ -433,35 +434,71 @@ function applyArcsinh( view, intensityUI, blackPoint )
    AS.executeOn( view, false );
 }
 
-// 2b. Midtones lift via PixelMath mtf() to compensate for ArcsinhStretch
-//     saturation past a certain stretch value. ArcsinhStretch alone
-//     plateaus around stretch~500 internally (further increases are
-//     numerically present but visually imperceptible). To give the
-//     high end of the slider real perceptible "blow-out", we add an
-//     MTF midtones-lift stage that activates only when the UI value
-//     goes past the default (STRETCH_DEF). The midtones balance ramps
-//     from 0.5 (no effect) at the default to 0.02 (extreme lift) at
-//     the max, using a sqrt(t) curve so the lift becomes perceptible
-//     soon after leaving the default rather than only at the very top
-//     of the slider.
-function applyMidtonesLift( view, intensityUI )
+// 2b. Star Glow: at high slider values, blur a copy of the stars
+//     layer with a Gaussian Convolution and add it back on top. This
+//     creates "halos" around the existing star pixels — the classic
+//     visual signature of blown-out stars in long-exposure astrophoto.
+//     Unlike a midtones lift, this works even when the stars layer
+//     has a perfectly black background (typical of StarXTerminator /
+//     StarNet++ output): the glow is generated FROM the existing star
+//     pixels rather than relying on midtone values to lift.
+//
+//     Sigma is computed as a fraction of the image width so the
+//     glow's visual size is the same in the cached preview and in
+//     the full-resolution Apply, regardless of source resolution.
+//     No-op below the default slider value, so the default preview
+//     looks exactly the same as before this stage was added.
+function applyStarGlow( view, intensityUI )
 {
    if ( intensityUI <= STRETCH_DEF ) return;
-   var t = (intensityUI - STRETCH_DEF) / (STRETCH_MAX - STRETCH_DEF);
-   var midtones = 0.5 - Math.sqrt( t ) * 0.48;     // 0.5 -> 0.02
+   var t      = (intensityUI - STRETCH_DEF) / (STRETCH_MAX - STRETCH_DEF);
+   var imWid  = view.image.width;
+   var sigma  = imWid * (0.0015 + Math.sqrt( t ) * 0.0065);   // ~0.15%..0.8%
+   var weight = Math.sqrt( t ) * 0.7;                           // 0..0.7
 
-   var pm = new PixelMath;
-   pm.expression          = "mtf(" + midtones.toFixed( 4 ) + ",$T)";
-   pm.useSingleExpression = true;
-   pm.createNewImage      = false;
-   pm.generateOutput      = true;
-   pm.singleThreaded      = false;
-   pm.optimization        = true;
-   pm.rescale             = false;
-   pm.truncate            = true;
-   pm.truncateLower       = 0.0;
-   pm.truncateUpper       = 1.0;
-   pm.executeOn( view, false );
+   // Cap sigma to avoid absurd values on giant images.
+   if ( sigma > 60 ) sigma = 60;
+
+   // Build a blurred working copy of the current view.
+   closeWindowById( ID_GLOW );
+   var im = view.image;
+   var gw = new ImageWindow(
+      im.width, im.height, im.numberOfChannels,
+      32, true, im.numberOfChannels > 1, ID_GLOW );
+   refreshViewCombos();
+   gw.mainView.beginProcess( UndoFlag_NoSwapFile );
+   gw.mainView.image.assign( im );
+   gw.mainView.endProcess();
+
+   try
+   {
+      var conv = new Convolution;
+      conv.mode          = Convolution.prototype.Parametric;
+      conv.sigma         = sigma;
+      conv.shape         = 2.0;            // Gaussian
+      conv.aspectRatio   = 1.0;
+      conv.rotationAngle = 0.0;
+      conv.executeOn( gw.mainView, false );
+
+      // Add weighted glow on top of the original stars, clamp to 1.
+      var pm = new PixelMath;
+      pm.expression          = "min(1,$T+" + ID_GLOW + "*" + weight.toFixed( 4 ) + ")";
+      pm.useSingleExpression = true;
+      pm.createNewImage      = false;
+      pm.generateOutput      = true;
+      pm.singleThreaded      = false;
+      pm.optimization        = true;
+      pm.rescale             = false;
+      pm.truncate            = true;
+      pm.truncateLower       = 0.0;
+      pm.truncateUpper       = 1.0;
+      pm.executeOn( view, false );
+   }
+   finally
+   {
+      gw.forceClose();
+      refreshViewCombos();
+   }
 }
 
 // 3. ColorSaturation hat-curve (AstroDL values, no third-party IP).
@@ -509,12 +546,12 @@ function applyCombine( starlessId, starsProcId, destView )
 }
 
 // Run the full pipeline:
-// copy stars -> arcsinh -> midtones lift -> (sat + scnr) -> combine.
+// copy stars -> arcsinh -> star glow -> (sat + scnr) -> combine.
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
 {
    copyInto( starsSrcId, procView );
    applyArcsinh( procView, data.stretchIntensity, data.blackPoint );
-   applyMidtonesLift( procView, data.stretchIntensity );
+   applyStarGlow( procView, data.stretchIntensity );
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
@@ -614,7 +651,7 @@ function applyFinal()
       // pipeline on it (operates in-place).
       copyInto( data.starsView.id, tw.mainView );
       applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint );
-      applyMidtonesLift( tw.mainView, data.stretchIntensity );
+      applyStarGlow( tw.mainView, data.stretchIntensity );
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
@@ -701,6 +738,7 @@ function cleanup()
    closeWindowById( ID_STP_SMALL );
    closeWindowById( ID_PV_SMALL );
    closeWindowById( ID_TMP_FULL );
+   closeWindowById( ID_GLOW );
    data.starlessSmall = null;
    data.starsSmall    = null;
    data.starsProc     = null;
@@ -975,13 +1013,12 @@ function CombinerDialog()
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
       "Stars stretch intensity. Linear slider from 1 to 1000.\n" +
-      "Default 100 (sweet spot: stars clearly visible without blowing " +
-      "out the brightest cores).\n" +
+      "Default 100 (sweet spot: stars clearly visible, no halos).\n" +
       "From 1 to 100: pure ArcsinhStretch (Lupton et al. 1999) " +
       "preserving star colors.\n" +
-      "From 100 to 1000: an additional midtones lift kicks in, " +
-      "progressively brightening fainter stars and blowing out the " +
-      "brightest cores until full blow-out at 1000.";
+      "From 100 to 1000: a progressively stronger star glow (Gaussian " +
+      "halo + add back) is layered on top, growing visible halos " +
+      "around every star until full blow-out at 1000.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

@@ -89,7 +89,7 @@
 // hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint. BOOST
 // is a multiplier for our own ColorSaturation hat-curve.
 #define STRETCH_MIN   1.0
-#define STRETCH_MAX   10000.0
+#define STRETCH_MAX   1000.0
 #define STRETCH_DEF   200.0
 
 #define BLACK_MIN     0.0
@@ -826,108 +826,6 @@ function PreviewFrame( parent )
 }
 PreviewFrame.prototype = new Frame;
 
-// ===================== LogStretchControl =====================
-// Label + Edit + Slider control with LOGARITHMIC slider mapping.
-// Used for ArcsinhStretch intensity which spans several orders of
-// magnitude (1..10000). With a linear slider the high end would feel
-// unresponsive (a 1-unit step at 9000 = 0.01% change) and the low end
-// would be cramped. With a log mapping every slider step is the same
-// PERCENTAGE change, so the slider feels uniform across the whole
-// range. Drop-in replacement for NumericControl in this script.
-function LogStretchControl( parent, labelText, labelWidth,
-                            minVal, maxVal, defVal )
-{
-   this.__base__ = Control;
-   this.__base__( parent );
-
-   var self        = this;
-   this._min       = minVal;
-   this._max       = maxVal;
-   this._value     = defVal;
-   this._lnMin     = Math.log( minVal );
-   this._lnMax     = Math.log( maxVal );
-   this._steps     = 1000;
-   this.onValueUpdated = null;
-
-   function clamp( v ) { return Math.max( self._min, Math.min( self._max, v ) ); }
-   function valueToPos( v )
-   {
-      var lnV = Math.log( clamp( v ) );
-      return Math.round( self._steps * (lnV - self._lnMin)
-                                     / (self._lnMax - self._lnMin) );
-   }
-   function posToValue( p )
-   {
-      var lnV = self._lnMin + (p / self._steps) * (self._lnMax - self._lnMin);
-      return Math.exp( lnV );
-   }
-   function formatValue( v )
-   {
-      if ( v >= 100 ) return Math.round( v ).toString();
-      if ( v >= 10  ) return v.toFixed( 1 );
-      return v.toFixed( 2 );
-   }
-
-   this.label = new Label( this );
-   this.label.text          = labelText;
-   this.label.setFixedWidth( labelWidth );
-   this.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-
-   this.edit = new Edit( this );
-   this.edit.text     = formatValue( this._value );
-   this.edit.minWidth = 70;
-
-   this.slider = new HorizontalSlider( this );
-   this.slider.setRange( 0, this._steps );
-   this.slider.value          = valueToPos( this._value );
-   this.slider.scaledMinWidth = 360;
-
-   // Public API: NumericControl-compatible.
-   this.setValue = function( v )
-   {
-      v = clamp( v );
-      self._value       = v;
-      self.edit.text    = formatValue( v );
-      self.slider.value = valueToPos( v );
-   };
-
-   Object.defineProperty( this, "value", {
-      get: function() { return self._value; }
-   });
-
-   this.slider.onValueUpdated = function( p )
-   {
-      var v = posToValue( p );
-      self._value    = v;
-      self.edit.text = formatValue( v );
-      if ( typeof self.onValueUpdated === "function" )
-         self.onValueUpdated( v );
-   };
-
-   this.edit.onEditCompleted = function()
-   {
-      var v = parseFloat( this.text );
-      if ( isNaN( v ) )
-      {
-         this.text = formatValue( self._value );
-         return;
-      }
-      v = clamp( v );
-      self._value       = v;
-      this.text         = formatValue( v );
-      self.slider.value = valueToPos( v );
-      if ( typeof self.onValueUpdated === "function" )
-         self.onValueUpdated( v );
-   };
-
-   this.sizer = new HorizontalSizer;
-   this.sizer.spacing = 4;
-   this.sizer.add( this.label );
-   this.sizer.add( this.edit );
-   this.sizer.add( this.slider, 100 );
-}
-LogStretchControl.prototype = new Control;
-
 // ===================== Dialog =====================
 
 function CombinerDialog()
@@ -1020,19 +918,22 @@ function CombinerDialog()
    stRow.add( this.starsViewList, 100 );
    stRow.add( this.resetBtn );
 
-   // ---- Stretch Intensity (1..10000, log slider, default 200) ----
-   // Logarithmic slider: every step is the same percentage change in
-   // stretch, so the slider feels uniform across the full 4-decade
-   // range (1..10000). Default 200 lands around 57% of the slider.
-   this.stretchNC = new LogStretchControl( this,
-      "Stretch Intensity:", labelWidth,
-      STRETCH_MIN, STRETCH_MAX, data.stretchIntensity );
+   // ---- Stretch Intensity (1..1000, linear, default 200) ----
+   this.stretchNC = new NumericControl( this );
+   this.stretchNC.label.text = "Stretch Intensity:";
+   this.stretchNC.label.setFixedWidth( labelWidth );
+   this.stretchNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   this.stretchNC.setRange( STRETCH_MIN, STRETCH_MAX );
+   this.stretchNC.slider.setRange( 0, 1000 );
+   this.stretchNC.slider.scaledMinWidth = 360;
+   this.stretchNC.setPrecision( 2 );
+   this.stretchNC.setValue( data.stretchIntensity );
+   this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
       "ArcsinhStretch intensity (Lupton et al. 1999).\n" +
-      "Logarithmic slider, range 1-10000.\n" +
-      "Default 200 (sensible starting point for typical linear " +
-      "stars-only data). Lower for sparse fields; push higher to " +
-      "blow out bright stars or pull faint ones from the noise.";
+      "Maps directly to ArcsinhStretch.stretch. Range 1-1000.\n" +
+      "Default 200. At 1000 the brightest star cores are fully blown " +
+      "out; values above that do not produce a meaningful difference.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

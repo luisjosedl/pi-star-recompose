@@ -414,15 +414,15 @@ function copyInto( srcId, destView )
    destView.endProcess();
 }
 
-// 2. ArcsinhStretch (PixInsight native, based on Lupton et al. 1999):
-//    y = asinh(stretch * x) / asinh(stretch)
-//    With useRgbws=true and protectHighlights=true so star colors are
-//    preserved instead of being clipped to white.
+// 2a. ArcsinhStretch (PixInsight native, based on Lupton et al. 1999):
+//     y = asinh(stretch * x) / asinh(stretch)
+//     With useRgbws=true and protectHighlights=true so star colors are
+//     preserved instead of being clipped to white.
 //
-//    The UI intensity (1..1000) is scaled by STRETCH_INTERNAL_X before
-//    being passed in, so the slider feels like a familiar 0..1000
-//    range while the underlying stretch can reach much higher values
-//    for a true blow-out at the top of the slider.
+//     The UI intensity (1..1000) is scaled by STRETCH_INTERNAL_X
+//     before being passed in, so the slider feels like a familiar
+//     0..1000 range while the underlying stretch reaches higher
+//     internal values.
 function applyArcsinh( view, intensityUI, blackPoint )
 {
    var AS = new ArcsinhStretch;
@@ -431,6 +431,35 @@ function applyArcsinh( view, intensityUI, blackPoint )
    AS.protectHighlights    = true;
    AS.useRgbws             = true;
    AS.executeOn( view, false );
+}
+
+// 2b. Midtones lift via PixelMath mtf() to compensate for ArcsinhStretch
+//     saturation past a certain stretch value. ArcsinhStretch alone
+//     plateaus around stretch~500 internally (further increases are
+//     numerically present but visually imperceptible). To give the high
+//     end of the slider real perceptible "blow-out", we add an MTF
+//     midtones-lift stage that activates only when the UI value goes
+//     past the default (STRETCH_DEF) and ramps from no effect at
+//     midtones=0.5 to a brutal lift at midtones=0.05 at slider max.
+//     Below the default the function is a no-op so the default preview
+//     looks exactly the same as before this stage was added.
+function applyMidtonesLift( view, intensityUI )
+{
+   if ( intensityUI <= STRETCH_DEF ) return;
+   var t = (intensityUI - STRETCH_DEF) / (STRETCH_MAX - STRETCH_DEF);
+   var midtones = 0.5 - t * 0.45;
+   var pm = new PixelMath;
+   pm.expression          = "mtf(" + midtones.toFixed( 4 ) + ",$T)";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( view, false );
 }
 
 // 3. ColorSaturation hat-curve (AstroDL values, no third-party IP).
@@ -477,11 +506,13 @@ function applyCombine( starlessId, starsProcId, destView )
    pm.executeOn( destView, false );
 }
 
-// Run the full pipeline: copy stars -> stretch -> (sat + scnr) -> combine.
+// Run the full pipeline:
+// copy stars -> arcsinh -> midtones lift -> (sat + scnr) -> combine.
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
 {
    copyInto( starsSrcId, procView );
    applyArcsinh( procView, data.stretchIntensity, data.blackPoint );
+   applyMidtonesLift( procView, data.stretchIntensity );
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
@@ -581,6 +612,7 @@ function applyFinal()
       // pipeline on it (operates in-place).
       copyInto( data.starsView.id, tw.mainView );
       applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint );
+      applyMidtonesLift( tw.mainView, data.stretchIntensity );
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
@@ -940,12 +972,14 @@ function CombinerDialog()
    this.stretchNC.setValue( data.stretchIntensity );
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
-      "ArcsinhStretch intensity (Lupton et al. 1999). Linear slider " +
-      "from 1 to 1000.\n" +
+      "Stars stretch intensity. Linear slider from 1 to 1000.\n" +
       "Default 100 (sweet spot: stars clearly visible without blowing " +
-      "out the brightest cores). Push toward 1000 to fully blow out " +
-      "bright stars; the curve is scaled internally so the high end " +
-      "has real headroom.";
+      "out the brightest cores).\n" +
+      "From 1 to 100: pure ArcsinhStretch (Lupton et al. 1999) " +
+      "preserving star colors.\n" +
+      "From 100 to 1000: an additional midtones lift kicks in, " +
+      "progressively brightening fainter stars and blowing out the " +
+      "brightest cores until full blow-out at 1000.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

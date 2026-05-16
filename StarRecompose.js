@@ -89,8 +89,8 @@
 // hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint. BOOST
 // is a multiplier for our own ColorSaturation hat-curve.
 #define STRETCH_MIN   1.0
-#define STRETCH_MAX   100.0
-#define STRETCH_DEF   10.0
+#define STRETCH_MAX   1000.0
+#define STRETCH_DEF   200.0
 
 #define BLACK_MIN     0.0
 #define BLACK_MAX     0.05
@@ -898,7 +898,7 @@ function CombinerDialog()
 
    this.resetBtn = new PushButton( this );
    this.resetBtn.text    = "Reset";
-   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 10, Black Point 0, Boost 1, no SCNR).";
+   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 200, Black Point 0, Boost 1, no SCNR).";
    this.resetBtn.onClick = function()
    {
       data.stretchIntensity = STRETCH_DEF;
@@ -931,8 +931,9 @@ function CombinerDialog()
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
       "ArcsinhStretch intensity (Lupton et al. 1999).\n" +
-      "Maps directly to ArcsinhStretch.stretch. Range 1-100.\n" +
-      "Default 10. Use higher values for fainter stars.";
+      "Maps directly to ArcsinhStretch.stretch. Range 1-1000.\n" +
+      "Default 200 (sensible starting point for typical linear " +
+      "stars-only data). Lower for sparse fields, higher for faint stars.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

@@ -85,12 +85,17 @@
 #define ID_PV_SMALL   "__AD_preview"
 #define ID_TMP_FULL   "__AD_proc_full"
 
-// Slider ranges. STRETCH maps DIRECTLY to ArcsinhStretch.stretch (no
-// hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint. BOOST
-// is a multiplier for our own ColorSaturation hat-curve.
-#define STRETCH_MIN   1.0
-#define STRETCH_MAX   1000.0
-#define STRETCH_DEF   200.0
+// Slider ranges. STRETCH is shown to the user as 1..1000 (a familiar
+// linear scale) but is multiplied by STRETCH_INTERNAL_X before being
+// passed to ArcsinhStretch.stretch, so the UI maximum (1000) actually
+// produces an internal stretch of 5000 - enough to fully blow out the
+// brightest stars without exposing the underlying scaling to the user.
+// BLACK_POINT maps directly to ArcsinhStretch.blackPoint. BOOST is a
+// multiplier for our own ColorSaturation hat-curve.
+#define STRETCH_MIN          1.0
+#define STRETCH_MAX          1000.0
+#define STRETCH_DEF          200.0
+#define STRETCH_INTERNAL_X   5.0
 
 #define BLACK_MIN     0.0
 #define BLACK_MAX     0.05
@@ -413,10 +418,15 @@ function copyInto( srcId, destView )
 //    y = asinh(stretch * x) / asinh(stretch)
 //    With useRgbws=true and protectHighlights=true so star colors are
 //    preserved instead of being clipped to white.
-function applyArcsinh( view, intensity, blackPoint )
+//
+//    The UI intensity (1..1000) is scaled by STRETCH_INTERNAL_X before
+//    being passed in, so the slider feels like a familiar 0..1000
+//    range while the underlying stretch can reach much higher values
+//    for a true blow-out at the top of the slider.
+function applyArcsinh( view, intensityUI, blackPoint )
 {
    var AS = new ArcsinhStretch;
-   AS.stretch              = intensity;
+   AS.stretch              = intensityUI * STRETCH_INTERNAL_X;
    AS.blackPoint           = blackPoint;
    AS.protectHighlights    = true;
    AS.useRgbws             = true;
@@ -930,10 +940,11 @@ function CombinerDialog()
    this.stretchNC.setValue( data.stretchIntensity );
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
-      "ArcsinhStretch intensity (Lupton et al. 1999).\n" +
-      "Maps directly to ArcsinhStretch.stretch. Range 1-1000.\n" +
-      "Default 200. At 1000 the brightest star cores are fully blown " +
-      "out; values above that do not produce a meaningful difference.";
+      "ArcsinhStretch intensity (Lupton et al. 1999). Linear slider " +
+      "from 1 to 1000.\n" +
+      "Default 200 (sensible starting point). Push toward 1000 to " +
+      "fully blow out the brightest star cores; the curve is scaled " +
+      "internally so the high end has real headroom.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

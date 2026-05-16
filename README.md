@@ -76,10 +76,10 @@ for one-key access.
 3. Open the script. It auto-selects views whose ID matches
    `starless` / `stars` / `star_mask`.
 4. Adjust the sliders while watching the preview. Defaults
-   `Intensity 100 / Black Point 0 / Boost 1` are a sensible starting
+   `Intensity 200 / Black Point 0 / Boost 1` are a sensible starting
    point for typical linear stars-only data. The Intensity slider
-   spans 1 to 1000; at 1000 the brightest star cores are fully blown
-   out.
+   spans 1 to 1000 and maps directly to PixInsight's
+   `ArcsinhStretch.stretch` value.
 5. (Optional) Tick **Save stretched stars** if you also want the
    processed stars layer as a separate image.
 6. Click **Apply**. A new image (`Combined`) is created with the result.

@@ -67,7 +67,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.8"
+#define VERSION       "1.1.9"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -84,19 +84,13 @@
 #define ID_STP_SMALL  "__AD_stars_proc"
 #define ID_PV_SMALL   "__AD_preview"
 #define ID_TMP_FULL   "__AD_proc_full"
-#define ID_GLOW       "__AD_glow"
 
-// Slider ranges. STRETCH is shown to the user as 1..1000 (a familiar
-// linear scale) but is multiplied by STRETCH_INTERNAL_X before being
-// passed to ArcsinhStretch.stretch, so the UI maximum (1000) actually
-// produces an internal stretch of 5000 - enough to fully blow out the
-// brightest stars without exposing the underlying scaling to the user.
-// BLACK_POINT maps directly to ArcsinhStretch.blackPoint. BOOST is a
-// multiplier for our own ColorSaturation hat-curve.
-#define STRETCH_MIN          1.0
-#define STRETCH_MAX          1000.0
-#define STRETCH_DEF          100.0
-#define STRETCH_INTERNAL_X   5.0
+// Slider ranges. STRETCH maps DIRECTLY to ArcsinhStretch.stretch (no
+// hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint.
+// BOOST is a multiplier for our own ColorSaturation hat-curve.
+#define STRETCH_MIN   1.0
+#define STRETCH_MAX   1000.0
+#define STRETCH_DEF   200.0
 
 #define BLACK_MIN     0.0
 #define BLACK_MAX     0.05
@@ -415,90 +409,19 @@ function copyInto( srcId, destView )
    destView.endProcess();
 }
 
-// 2a. ArcsinhStretch (PixInsight native, based on Lupton et al. 1999):
-//     y = asinh(stretch * x) / asinh(stretch)
-//     With useRgbws=true and protectHighlights=true so star colors are
-//     preserved instead of being clipped to white.
-//
-//     The UI intensity (1..1000) is scaled by STRETCH_INTERNAL_X
-//     before being passed in, so the slider feels like a familiar
-//     0..1000 range while the underlying stretch reaches higher
-//     internal values.
-function applyArcsinh( view, intensityUI, blackPoint )
+// 2. ArcsinhStretch (PixInsight native, based on Lupton et al. 1999):
+//    y = asinh(stretch * x) / asinh(stretch)
+//    With useRgbws=true and protectHighlights=true so star colors are
+//    preserved instead of being clipped to white. The UI intensity is
+//    passed directly to ArcsinhStretch.stretch with no scaling.
+function applyArcsinh( view, intensity, blackPoint )
 {
    var AS = new ArcsinhStretch;
-   AS.stretch              = intensityUI * STRETCH_INTERNAL_X;
+   AS.stretch              = intensity;
    AS.blackPoint           = blackPoint;
    AS.protectHighlights    = true;
    AS.useRgbws             = true;
    AS.executeOn( view, false );
-}
-
-// 2b. Star Glow: at high slider values, blur a copy of the stars
-//     layer with a Gaussian Convolution and add it back on top. This
-//     creates "halos" around the existing star pixels — the classic
-//     visual signature of blown-out stars in long-exposure astrophoto.
-//     Unlike a midtones lift, this works even when the stars layer
-//     has a perfectly black background (typical of StarXTerminator /
-//     StarNet++ output): the glow is generated FROM the existing star
-//     pixels rather than relying on midtone values to lift.
-//
-//     Sigma is computed as a fraction of the image width so the
-//     glow's visual size is the same in the cached preview and in
-//     the full-resolution Apply, regardless of source resolution.
-//     No-op below the default slider value, so the default preview
-//     looks exactly the same as before this stage was added.
-function applyStarGlow( view, intensityUI )
-{
-   if ( intensityUI <= STRETCH_DEF ) return;
-   var t      = (intensityUI - STRETCH_DEF) / (STRETCH_MAX - STRETCH_DEF);
-   var imWid  = view.image.width;
-   var sigma  = imWid * (0.0015 + Math.sqrt( t ) * 0.0065);   // ~0.15%..0.8%
-   var weight = Math.sqrt( t ) * 0.7;                           // 0..0.7
-
-   // Cap sigma to avoid absurd values on giant images.
-   if ( sigma > 60 ) sigma = 60;
-
-   // Build a blurred working copy of the current view.
-   closeWindowById( ID_GLOW );
-   var im = view.image;
-   var gw = new ImageWindow(
-      im.width, im.height, im.numberOfChannels,
-      32, true, im.numberOfChannels > 1, ID_GLOW );
-   refreshViewCombos();
-   gw.mainView.beginProcess( UndoFlag_NoSwapFile );
-   gw.mainView.image.assign( im );
-   gw.mainView.endProcess();
-
-   try
-   {
-      var conv = new Convolution;
-      conv.mode          = Convolution.prototype.Parametric;
-      conv.sigma         = sigma;
-      conv.shape         = 2.0;            // Gaussian
-      conv.aspectRatio   = 1.0;
-      conv.rotationAngle = 0.0;
-      conv.executeOn( gw.mainView, false );
-
-      // Add weighted glow on top of the original stars, clamp to 1.
-      var pm = new PixelMath;
-      pm.expression          = "min(1,$T+" + ID_GLOW + "*" + weight.toFixed( 4 ) + ")";
-      pm.useSingleExpression = true;
-      pm.createNewImage      = false;
-      pm.generateOutput      = true;
-      pm.singleThreaded      = false;
-      pm.optimization        = true;
-      pm.rescale             = false;
-      pm.truncate            = true;
-      pm.truncateLower       = 0.0;
-      pm.truncateUpper       = 1.0;
-      pm.executeOn( view, false );
-   }
-   finally
-   {
-      gw.forceClose();
-      refreshViewCombos();
-   }
 }
 
 // 3. ColorSaturation hat-curve (AstroDL values, no third-party IP).
@@ -546,12 +469,11 @@ function applyCombine( starlessId, starsProcId, destView )
 }
 
 // Run the full pipeline:
-// copy stars -> arcsinh -> star glow -> (sat + scnr) -> combine.
+// copy stars -> arcsinh -> (sat + scnr) -> combine.
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
 {
    copyInto( starsSrcId, procView );
    applyArcsinh( procView, data.stretchIntensity, data.blackPoint );
-   applyStarGlow( procView, data.stretchIntensity );
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
@@ -651,7 +573,6 @@ function applyFinal()
       // pipeline on it (operates in-place).
       copyInto( data.starsView.id, tw.mainView );
       applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint );
-      applyStarGlow( tw.mainView, data.stretchIntensity );
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
@@ -738,7 +659,6 @@ function cleanup()
    closeWindowById( ID_STP_SMALL );
    closeWindowById( ID_PV_SMALL );
    closeWindowById( ID_TMP_FULL );
-   closeWindowById( ID_GLOW );
    data.starlessSmall = null;
    data.starsSmall    = null;
    data.starsProc     = null;
@@ -980,7 +900,7 @@ function CombinerDialog()
 
    this.resetBtn = new PushButton( this );
    this.resetBtn.text    = "Reset";
-   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 100, Black Point 0, Boost 1, no SCNR).";
+   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 200, Black Point 0, Boost 1, no SCNR).";
    this.resetBtn.onClick = function()
    {
       data.stretchIntensity = STRETCH_DEF;
@@ -1012,13 +932,9 @@ function CombinerDialog()
    this.stretchNC.setValue( data.stretchIntensity );
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
-      "Stars stretch intensity. Linear slider from 1 to 1000.\n" +
-      "Default 100 (sweet spot: stars clearly visible, no halos).\n" +
-      "From 1 to 100: pure ArcsinhStretch (Lupton et al. 1999) " +
-      "preserving star colors.\n" +
-      "From 100 to 1000: a progressively stronger star glow (Gaussian " +
-      "halo + add back) is layered on top, growing visible halos " +
-      "around every star until full blow-out at 1000.";
+      "ArcsinhStretch intensity (Lupton et al. 1999).\n" +
+      "Maps directly to ArcsinhStretch.stretch. Range 1-1000.\n" +
+      "Default 200. Lower for sparse fields, higher for faint stars.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;

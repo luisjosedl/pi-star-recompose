@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.19"
+#define VERSION       "1.1.20"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -969,6 +969,40 @@ function pctToPx( pct, imageWidth )
    return Math.max( 0.5, imageWidth * pct / 100.0 );
 }
 
+// Stroke a closed polygon as outline only, with a black "shadow" line
+// underneath the colored line for high-contrast visibility on top of
+// arbitrary preview content (works on bright color or pitch black).
+// drawLine is used (not drawPolygon) because PJSR's drawPolygon
+// treats Brush(0x00000000) as opaque black instead of transparent,
+// filling the polygon and hiding the underlying image.
+function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
+{
+   if ( pts == null || pts.length < 2 ) return;
+   var shadowPen = new Pen( 0xff000000, lineWidth + 1.5 );
+   var colorPen  = new Pen( mainColor,  lineWidth );
+   if ( dashed )
+   {
+      try { shadowPen.style = 2; colorPen.style = 2; } catch ( pe ) {}
+   }
+
+   // Two passes: shadow first (wider, black), then color on top.
+   g.pen = shadowPen;
+   for ( var i = 0; i < pts.length; ++i )
+   {
+      var pa = pts[i];
+      var pb = pts[ (i + 1) % pts.length ];
+      g.drawLine( pa.x, pa.y, pb.x, pb.y );
+   }
+
+   g.pen = colorPen;
+   for ( var j = 0; j < pts.length; ++j )
+   {
+      var pc = pts[j];
+      var pd = pts[ (j + 1) % pts.length ];
+      g.drawLine( pc.x, pc.y, pd.x, pd.y );
+   }
+}
+
 // ===================== Active shape =====================
 
 // Build a PixelMath sub-expression (no surrounding "min(1,...)" or
@@ -1655,22 +1689,12 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Outline only (PJSR's drawPolygon would fill with the
-            // brush color, and Brush(0x00000000) is opaque black in
-            // PJSR even though it looks like ARGB(0,0,0,0)). Stroking
-            // the polygon as a sequence of line segments avoids the
-            // fill entirely.
-            g.pen = new Pen( maskAccentPen(), 2.0 );
-            for ( var pi = 0; pi < pts.length; ++pi )
-            {
-               var pa = pts[ pi ];
-               var pb = pts[ (pi + 1) % pts.length ];
-               g.drawLine( pa.x, pa.y, pb.x, pb.y );
-            }
+            // Main outline with black-shadow + colored stroke combo
+            // for visibility against any preview content.
+            strokeClosedPathWithShadow( g, pts, maskAccentPen(), 2.0, false );
 
-            // Inner "core" contour: a thin dashed inset showing where
-            // the solid mask=1 zone ends and the gradient starts.
-            // Drawn only when the shape has a real gradient (gc < 1).
+            // Inner "core" contour (dashed): where solid mask=1 ends
+            // and the gradient starts. Only when gc < 1.
             var gcShape = (s.gradientCenter != null)
                         ? s.gradientCenter : data.maskGradientCtr;
             if ( s.type === "ellipse" && gcShape < 0.99
@@ -1687,15 +1711,8 @@ function PreviewFrame( parent )
                   var ccp = self._imageRectToCanvas( cwx, cwy, cwx, cwy );
                   corePts.push( new Point( ccp.x0, ccp.y0 ) );
                }
-               var corePen = new Pen( maskAccentPen(), 1.0 );
-               try { corePen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
-               g.pen = corePen;
-               for ( var ci2 = 0; ci2 < corePts.length; ++ci2 )
-               {
-                  var ca = corePts[ ci2 ];
-                  var cb = corePts[ (ci2 + 1) % corePts.length ];
-                  g.drawLine( ca.x, ca.y, cb.x, cb.y );
-               }
+               strokeClosedPathWithShadow( g, corePts, maskAccentPen(),
+                                           1.5, true );
             }
 
             // Draw the 4 corner handles + the rotation handle.

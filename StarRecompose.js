@@ -67,7 +67,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.10"
+#define VERSION       "1.1.11"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -136,6 +136,14 @@ function CombinerData()
    this.brushRadiusPct   = BRUSH_RADIUS_DEF;
    this.maskInvert       = false;
    this.maskOverlayBitmap = null;     // cached visualization bitmap
+
+   // Active editable shape (one at a time, drawn with the Ellipse or
+   // Rect tool). Can be moved / resized / rotated until the user
+   // clicks "Commit Shape" (or switches tools), at which point it is
+   // rasterized into the permanent mask and cleared. Brush strokes
+   // bypass this and go straight to the raster mask.
+   //   {type:"ellipse"|"rect", cx, cy, rx, ry, angle, feather}
+   this.activeShape      = null;
 
    // Persist current values into the script instance (the New Instance
    // triangle at the bottom-left drags a snapshot to the workspace).
@@ -477,24 +485,37 @@ function applySCNR( view )
    P.executeOn( view, false );
 }
 
+// Build the "effective mask" sub-expression, combining the raster
+// mask (if it exists) with the active shape's inline expression
+// (if there is one) via max(). Returns null if neither contributes.
+function buildEffectiveMaskExpr( maskId, activeExpr )
+{
+   if ( maskId == null && activeExpr == null ) return null;
+   if ( maskId == null ) return activeExpr;
+   if ( activeExpr == null ) return maskId;
+   return "max(" + maskId + "," + activeExpr + ")";
+}
+
 // 5. Combine:  destView = min(1, starless + starsProcessed * weight)
 //    where weight = 1                       (no mask)
 //                 = (1 - mask * strength)   (normal mask: hide stars where painted)
 //                 = (1 - (1 - mask) * strength)  (inverted mask: keep stars only
 //                                                  where painted)
-function applyCombineWithMask( starlessId, starsProcId, maskId, strength,
-                               invert, destView )
+function applyCombineWithMask( starlessId, starsProcId, maskId, activeExpr,
+                               strength, invert, destView )
 {
+   var effective = buildEffectiveMaskExpr( maskId, activeExpr );
+
    var pm = new PixelMath;
-   if ( maskId == null || strength <= 0 )
+   if ( effective == null || strength <= 0 )
    {
       pm.expression = "min(1," + starlessId + "+" + starsProcId + ")";
    }
    else
    {
       var maskTerm = invert
-         ? "(1-(1-" + maskId + ")*" + strength.toFixed( 4 ) + ")"
-         : "(1-"      + maskId + "*"     + strength.toFixed( 4 ) + ")";
+         ? "(1-(1-" + effective + ")*" + strength.toFixed( 4 ) + ")"
+         : "(1-"      + effective + "*"     + strength.toFixed( 4 ) + ")";
       pm.expression = "min(1," + starlessId + "+" + starsProcId + "*" + maskTerm + ")";
    }
    pm.useSingleExpression = true;
@@ -724,6 +745,148 @@ function pctToPx( pct, imageWidth )
    return Math.max( 0.5, imageWidth * pct / 100.0 );
 }
 
+// ===================== Active shape =====================
+
+// Build a PixelMath sub-expression (no surrounding "min(1,...)" or
+// strength) that evaluates to the feathered mask of the active shape,
+// 1 deep inside, falling off to 0 over `feather` pixels outside.
+// Returns null when there is no active shape or the cache is missing.
+function activeShapeMaskExpr()
+{
+   if ( data.activeShape == null ) return null;
+   if ( data.starlessSmall == null ) return null;
+
+   var s = data.activeShape;
+   var rx = Math.max( 0.5, s.rx );
+   var ry = Math.max( 0.5, s.ry );
+   var f  = Math.max( 0.5, s.feather );
+   var cx = s.cx.toFixed( 2 );
+   var cy = s.cy.toFixed( 2 );
+
+   // Rotated coordinates in shape's local frame:
+   //   lx =  (x-cx)*cos(a) + (y-cy)*sin(a)
+   //   ly = -(x-cx)*sin(a) + (y-cy)*cos(a)
+   var co = Math.cos( s.angle ).toFixed( 6 );
+   var si = Math.sin( s.angle ).toFixed( 6 );
+   var lxExpr = "((x()-" + cx + ")*" + co + "+(y()-" + cy + ")*" + si + ")";
+   var lyExpr = "(-(x()-" + cx + ")*" + si + "+(y()-" + cy + ")*" + co + ")";
+
+   if ( s.type === "ellipse" )
+   {
+      var fnorm = (f / Math.min( rx, ry )).toFixed( 4 );
+      var ax = "(" + lxExpr + "/" + rx.toFixed( 4 ) + ")";
+      var ay = "(" + lyExpr + "/" + ry.toFixed( 4 ) + ")";
+      var dist = "sqrt(" + ax + "*" + ax + "+" + ay + "*" + ay + ")";
+      return "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
+   }
+   else if ( s.type === "rect" )
+   {
+      // Distance from the rectangle's edge in local coords.
+      var dx = "max(0,abs(" + lxExpr + ")-" + rx.toFixed( 2 ) + ")";
+      var dy = "max(0,abs(" + lyExpr + ")-" + ry.toFixed( 2 ) + ")";
+      var dist = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
+      return "max(0,min(1,1-" + dist + "/" + f.toFixed( 4 ) + "))";
+   }
+   return null;
+}
+
+// Bake the active shape into the persistent raster mask and clear it.
+// Called from "Commit Shape" button and when the user switches tools.
+function commitActiveShape()
+{
+   if ( data.activeShape == null ) return;
+   var s = data.activeShape;
+   data.activeShape = null;       // clear FIRST so the painter doesn't pick it up
+   var w = ensureMaskWindow();
+   if ( w == null ) return;
+
+   // Use the same expression we used inline, but apply it to the mask
+   // window with a max() blend so it accumulates with existing content.
+   var rx = Math.max( 0.5, s.rx );
+   var ry = Math.max( 0.5, s.ry );
+   var f  = Math.max( 0.5, s.feather );
+   var cx = s.cx.toFixed( 2 );
+   var cy = s.cy.toFixed( 2 );
+   var co = Math.cos( s.angle ).toFixed( 6 );
+   var si = Math.sin( s.angle ).toFixed( 6 );
+   var lxExpr = "((x()-" + cx + ")*" + co + "+(y()-" + cy + ")*" + si + ")";
+   var lyExpr = "(-(x()-" + cx + ")*" + si + "+(y()-" + cy + ")*" + co + ")";
+
+   var value;
+   if ( s.type === "ellipse" )
+   {
+      var fnorm = (f / Math.min( rx, ry )).toFixed( 4 );
+      var ax = "(" + lxExpr + "/" + rx.toFixed( 4 ) + ")";
+      var ay = "(" + lyExpr + "/" + ry.toFixed( 4 ) + ")";
+      var dist = "sqrt(" + ax + "*" + ax + "+" + ay + "*" + ay + ")";
+      value = "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
+   }
+   else
+   {
+      var dx = "max(0,abs(" + lxExpr + ")-" + rx.toFixed( 2 ) + ")";
+      var dy = "max(0,abs(" + lyExpr + ")-" + ry.toFixed( 2 ) + ")";
+      var dist2 = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
+      value = "max(0,min(1,1-" + dist2 + "/" + f.toFixed( 4 ) + "))";
+   }
+
+   var pm = new PixelMath;
+   pm.expression          = "max($T," + value + ")";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( w.mainView, false );
+}
+
+// Compute handle positions for the active shape in IMAGE coordinates.
+// Returns an array of {x, y, mode} or an empty array.
+// Modes: "resize-NW" / "NE" / "SE" / "SW" and "rotate".
+function getActiveShapeHandles()
+{
+   var s = data.activeShape;
+   if ( s == null ) return [];
+   var co = Math.cos( s.angle );
+   var si = Math.sin( s.angle );
+   var rx = s.rx, ry = s.ry;
+   // Rotation handle offset above the shape in the local +y direction.
+   // (Image y grows DOWNWARD so the visual "above" is local -y.)
+   var rotOffset = Math.max( 20, ry * 0.3 );
+   var local = [
+      { x: -rx, y: -ry,            mode: "resize-NW" },
+      { x:  rx, y: -ry,            mode: "resize-NE" },
+      { x:  rx, y:  ry,            mode: "resize-SE" },
+      { x: -rx, y:  ry,            mode: "resize-SW" },
+      { x:  0,  y: -(ry+rotOffset), mode: "rotate"    }
+   ];
+   var out = [];
+   for ( var i = 0; i < local.length; ++i )
+   {
+      var lx = local[i].x, ly = local[i].y;
+      var wx = lx * co - ly * si;
+      var wy = lx * si + ly * co;
+      out.push( { x: s.cx + wx, y: s.cy + wy, mode: local[i].mode } );
+   }
+   return out;
+}
+
+// Hit test: is image-coord (px, py) inside the active shape's body?
+function pointInActiveShape( px, py )
+{
+   var s = data.activeShape;
+   if ( s == null ) return false;
+   var dx = px - s.cx;
+   var dy = py - s.cy;
+   var co = Math.cos( -s.angle );
+   var si = Math.sin( -s.angle );
+   var lx = dx * co - dy * si;
+   var ly = dx * si + dy * co;
+   if ( s.type === "ellipse" )
+      return (lx/s.rx)*(lx/s.rx) + (ly/s.ry)*(ly/s.ry) < 1;
+   return Math.abs( lx ) < s.rx && Math.abs( ly ) < s.ry;
+}
+
 // Run the full pipeline:
 // copy stars -> arcsinh -> (sat + scnr) -> combine (with optional mask).
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
@@ -736,8 +899,10 @@ function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
       if ( data.removeGreen )
          applySCNR( procView );
    }
-   var maskId = (maskIsActive() && data.maskStrength > 0) ? ID_MASK : null;
-   applyCombineWithMask( starlessId, procView.id, maskId,
+   var maskId    = (maskIsActive() && data.maskStrength > 0) ? ID_MASK : null;
+   var activeExp = (data.activeShape != null && data.maskStrength > 0)
+                 ? activeShapeMaskExpr() : null;
+   applyCombineWithMask( starlessId, procView.id, maskId, activeExp,
                          data.maskStrength, data.maskInvert, targetView );
 }
 
@@ -838,19 +1003,54 @@ function applyFinal()
             applySCNR( tw.mainView );
       }
 
-      // If the user painted a mask, build a full-resolution version
-      // by resampling the preview-size mask up to source dimensions.
+      // If the user painted a raster mask, build a full-resolution
+      // version by resampling the preview-size mask up to source
+      // dimensions. Build the active-shape full-res inline expression
+      // by rescaling shape parameters (which were in preview coords)
+      // to full-res coords.
       var maskFullWindow = null;
       var maskExpr       = "";
-      if ( maskIsActive() && data.maskStrength > 0 )
+      if ( data.maskStrength > 0 )
       {
-         maskFullWindow = buildFullResMask( sl.width, sl.height );
-         if ( maskFullWindow != null )
+         var maskFullId = null;
+         if ( maskIsActive() )
          {
-            var s = data.maskStrength.toFixed( 4 );
+            maskFullWindow = buildFullResMask( sl.width, sl.height );
+            if ( maskFullWindow != null )
+               maskFullId = ID_MASK_FULL;
+         }
+
+         var activeFullExpr = null;
+         if ( data.activeShape != null && data.starlessSmall != null )
+         {
+            var prevW = data.starlessSmall.mainView.image.width;
+            var scl   = sl.width / prevW;
+            var s = data.activeShape;
+            // Temporarily upscale the active shape parameters and build
+            // the expression; then restore the original shape.
+            var orig = { cx:s.cx, cy:s.cy, rx:s.rx, ry:s.ry, feather:s.feather };
+            s.cx      *= scl;
+            s.cy      *= scl;
+            s.rx      *= scl;
+            s.ry      *= scl;
+            s.feather *= scl;
+            try {
+               activeFullExpr = activeShapeMaskExpr();
+            }
+            finally {
+               s.cx = orig.cx; s.cy = orig.cy;
+               s.rx = orig.rx; s.ry = orig.ry;
+               s.feather = orig.feather;
+            }
+         }
+
+         var effective = buildEffectiveMaskExpr( maskFullId, activeFullExpr );
+         if ( effective != null )
+         {
+            var str = data.maskStrength.toFixed( 4 );
             maskExpr = data.maskInvert
-               ? "*(1-(1-" + ID_MASK_FULL + ")*" + s + ")"
-               : "*(1-"      + ID_MASK_FULL + "*"     + s + ")";
+               ? "*(1-(1-" + effective + ")*" + str + ")"
+               : "*(1-"      + effective + "*"     + str + ")";
          }
       }
 
@@ -946,6 +1146,7 @@ function cleanup()
    data.starsProc         = null;
    data.previewSmall      = null;
    data.maskOverlayBitmap = null;
+   data.activeShape       = null;
 }
 
 // ===================== Debounce =====================
@@ -1076,21 +1277,81 @@ function PreviewFrame( parent )
             catch ( ce ) { /* fall through quietly */ }
          }
 
-         // In-progress rubber band for ellipse / rectangle tools.
-         if ( self._drawStart != null && self._drawCurrent != null
-           && (data.maskTool === "ellipse" || data.maskTool === "rect") )
+         // Active shape (editable): outline + handles. Drawn on top of
+         // the mask overlay so the user can always see and grab it.
+         if ( data.activeShape != null
+           && (data.maskTool === "ellipse" || data.maskTool === "rect" ||
+               data.activeShape != null) )
          {
-            var x1 = Math.min( self._drawStart.x, self._drawCurrent.x );
-            var y1 = Math.min( self._drawStart.y, self._drawCurrent.y );
-            var x2 = Math.max( self._drawStart.x, self._drawCurrent.x );
-            var y2 = Math.max( self._drawStart.y, self._drawCurrent.y );
-            var canvasRect = self._imageRectToCanvas( x1, y1, x2, y2 );
-            g.pen = new Pen( 0xffff66aa, 2.0 );
-            g.brush = new Brush( 0x00000000 );
-            if ( data.maskTool === "ellipse" )
-               g.drawEllipse( canvasRect );
+            var s = data.activeShape;
+            // Build polygon points around the shape's local rim.
+            var pts = [];
+            var N = 64;
+            var co = Math.cos( s.angle );
+            var si = Math.sin( s.angle );
+            if ( s.type === "ellipse" )
+            {
+               for ( var i = 0; i < N; ++i )
+               {
+                  var th = (i / N) * 2 * Math.PI;
+                  var lx = s.rx * Math.cos( th );
+                  var ly = s.ry * Math.sin( th );
+                  var wx = s.cx + lx * co - ly * si;
+                  var wy = s.cy + lx * si + ly * co;
+                  var cp = self._imageRectToCanvas( wx, wy, wx, wy );
+                  pts.push( new Point( cp.x0, cp.y0 ) );
+               }
+            }
             else
-               g.drawRect( canvasRect );
+            {
+               var local = [ [-s.rx, -s.ry], [s.rx, -s.ry],
+                             [ s.rx,  s.ry], [-s.rx,  s.ry] ];
+               for ( var k = 0; k < 4; ++k )
+               {
+                  var lx2 = local[k][0], ly2 = local[k][1];
+                  var wx2 = s.cx + lx2 * co - ly2 * si;
+                  var wy2 = s.cy + lx2 * si + ly2 * co;
+                  var cp2 = self._imageRectToCanvas( wx2, wy2, wx2, wy2 );
+                  pts.push( new Point( cp2.x0, cp2.y0 ) );
+               }
+            }
+            g.pen   = new Pen( 0xffff66aa, 2.0 );
+            g.brush = new Brush( 0x00000000 );
+            g.drawPolygon( pts );
+
+            // Draw the 4 corner handles + the rotation handle.
+            var handles = getActiveShapeHandles();
+            for ( var h = 0; h < handles.length; ++h )
+            {
+               var hc = self._imageRectToCanvas(
+                  handles[h].x, handles[h].y,
+                  handles[h].x, handles[h].y );
+               if ( handles[h].mode === "rotate" )
+               {
+                  // Filled green circle for rotation.
+                  g.pen   = new Pen( 0xff66ff66, 1.5 );
+                  g.brush = new Brush( 0xff336633 );
+                  g.drawEllipse( new Rect( hc.x0 - 6, hc.y0 - 6,
+                                           hc.x0 + 6, hc.y0 + 6 ) );
+                  // Stem connecting to the shape.
+                  var topImg = handles[0];   // NW handle as proxy for "above"
+                  // Better: top center of shape.
+                  var localTopX = 0, localTopY = -s.ry;
+                  var topWx = s.cx + localTopX * co - localTopY * si;
+                  var topWy = s.cy + localTopX * si + localTopY * co;
+                  var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
+                  g.pen = new Pen( 0xff66ff66, 1.5 );
+                  g.drawLine( topC.x0, topC.y0, hc.x0, hc.y0 );
+               }
+               else
+               {
+                  // Pink filled squares for resize.
+                  g.pen   = new Pen( 0xffffffff, 1.5 );
+                  g.brush = new Brush( 0xffff66aa );
+                  g.drawRect( new Rect( hc.x0 - 5, hc.y0 - 5,
+                                        hc.x0 + 5, hc.y0 + 5 ) );
+               }
+            }
          }
 
          // Brush cursor ring when the brush tool is active.
@@ -1163,11 +1424,40 @@ function PreviewFrame( parent )
       self._zoomAt( x, y, factor );
    };
 
+   // Drag mode set in onMousePress, read in onMouseMove/onMouseRelease.
+   //   null | "pan" | "draw" | "move"
+   //   "resize-NW" | "resize-NE" | "resize-SE" | "resize-SW" | "rotate"
+   this._dragMode      = null;
+   this._dragShapeBak  = null;     // deep copy of activeShape at drag start
+
+   // Hit-test (x,y) in canvas coords against the active shape's
+   // handles (priority) then its body. Returns drag mode string or null.
+   this._hitActiveShape = function( cx, cy )
+   {
+      if ( data.activeShape == null ) return null;
+      var handles = getActiveShapeHandles();
+      for ( var i = 0; i < handles.length; ++i )
+      {
+         var cp = self._imageRectToCanvas(
+            handles[i].x, handles[i].y,
+            handles[i].x, handles[i].y );
+         var dx = cx - cp.x0;
+         var dy = cy - cp.y0;
+         if ( dx * dx + dy * dy <= 144 )       // 12-px hit radius
+            return handles[i].mode;
+      }
+      var ip = self._canvasToImage( cx, cy );
+      if ( ip != null && pointInActiveShape( ip.x, ip.y ) )
+         return "move";
+      return null;
+   };
+
    this.onMousePress = function( x, y, button, buttons, modifiers )
    {
       // Pan tool: classic behavior.
       if ( data.maskTool === "pan" || self.bitmap == null )
       {
+         self._dragMode      = "pan";
          self._panning       = true;
          self._panStart.x    = x;
          self._panStart.y    = y;
@@ -1177,28 +1467,67 @@ function PreviewFrame( parent )
          return;
       }
 
-      // Drawing tools.
+      // Brush tool: paint immediately at the cursor.
+      if ( data.maskTool === "brush" )
+      {
+         var p0 = self._canvasToImage( x, y );
+         if ( p0 == null ) return;
+         self._dragMode    = "draw";
+         self._drawStart   = p0;
+         self._drawCurrent = p0;
+         self._cursorImg   = p0;
+         var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
+         var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
+         paintCircleToMask( p0.x, p0.y, radPx, feathr );
+         rebuildMaskOverlay();
+         scheduleUpdate();
+         self.repaint();
+         return;
+      }
+
+      // Ellipse / Rectangle: either grab a handle on the active shape
+      // or start drawing a new active shape (replacing any previous).
       var p = self._canvasToImage( x, y );
       if ( p == null ) return;
+
+      var hit = self._hitActiveShape( x, y );
+      if ( hit != null )
+      {
+         self._dragMode = hit;
+         self._drawStart = p;
+         self._dragShapeBak = {
+            cx:     data.activeShape.cx,
+            cy:     data.activeShape.cy,
+            rx:     data.activeShape.rx,
+            ry:     data.activeShape.ry,
+            angle:  data.activeShape.angle
+         };
+         self._cursorImg = p;
+         self.repaint();
+         return;
+      }
+
+      // No hit -> start a brand-new active shape.
+      var feathr2 = pctToPx( data.maskFeatherPct, self.bitmap.width );
+      data.activeShape = {
+         type:    data.maskTool,    // "ellipse" or "rect"
+         cx:      p.x,
+         cy:      p.y,
+         rx:      0.5,
+         ry:      0.5,
+         angle:   0,
+         feather: feathr2
+      };
+      self._dragMode    = "draw";
       self._drawStart   = p;
       self._drawCurrent = p;
       self._cursorImg   = p;
-
-      if ( data.maskTool === "brush" )
-      {
-         var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
-         var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
-         paintCircleToMask( p.x, p.y, radPx, feathr );
-         rebuildMaskOverlay();
-         scheduleUpdate();
-      }
-
       self.repaint();
    };
 
    this.onMouseMove = function( x, y, buttons, modifiers )
    {
-      if ( self._panning )
+      if ( self._dragMode === "pan" )
       {
          self.panX = self._panStart.panX + (x - self._panStart.x);
          self.panY = self._panStart.panY + (y - self._panStart.y);
@@ -1206,67 +1535,100 @@ function PreviewFrame( parent )
          return;
       }
 
-      // Track cursor for brush ring overlay even when not dragging.
       var p = self._canvasToImage( x, y );
       self._cursorImg = p;
 
-      if ( self._drawStart != null && p != null )
+      if ( self._dragMode != null && p != null )
       {
-         self._drawCurrent = p;
-         if ( data.maskTool === "brush" )
+         if ( data.maskTool === "brush" && self._dragMode === "draw" )
          {
             var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
             var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
             paintCircleToMask( p.x, p.y, radPx, feathr );
-            // Update preview immediately, defer overlay rebuild to release
-            // for performance (overlay rebuild is the slowest step).
+            scheduleUpdate();
+         }
+         else if ( data.activeShape != null )
+         {
+            var s = data.activeShape;
+            if ( self._dragMode === "draw" )
+            {
+               // Define a bounding-box ellipse/rect from drag start to p.
+               s.cx = (self._drawStart.x + p.x) / 2;
+               s.cy = (self._drawStart.y + p.y) / 2;
+               s.rx = Math.max( 1, Math.abs( p.x - self._drawStart.x ) / 2 );
+               s.ry = Math.max( 1, Math.abs( p.y - self._drawStart.y ) / 2 );
+               s.angle = 0;
+            }
+            else if ( self._dragMode === "move" )
+            {
+               s.cx = self._dragShapeBak.cx + (p.x - self._drawStart.x);
+               s.cy = self._dragShapeBak.cy + (p.y - self._drawStart.y);
+            }
+            else if ( self._dragMode === "rotate" )
+            {
+               var dxr = p.x - s.cx, dyr = p.y - s.cy;
+               // Rotation handle sits "above" shape (-y) when angle=0,
+               // so a cursor at (-y) maps to angle = 0.
+               s.angle = Math.atan2( dyr, dxr ) + Math.PI / 2;
+            }
+            else if ( self._dragMode.indexOf( "resize-" ) === 0 )
+            {
+               // Opposite corner stays fixed in IMAGE coords.
+               var oppMap = { "resize-NW": 2, "resize-NE": 3,
+                              "resize-SE": 0, "resize-SW": 1 };
+               // We need the opposite handle in image coords using the
+               // backup shape (the shape before this drag started).
+               var bak = self._dragShapeBak;
+               var co = Math.cos( bak.angle );
+               var si = Math.sin( bak.angle );
+               var lxOpp, lyOpp;
+               switch ( self._dragMode )
+               {
+                  case "resize-NW": lxOpp =  bak.rx; lyOpp =  bak.ry; break;
+                  case "resize-NE": lxOpp = -bak.rx; lyOpp =  bak.ry; break;
+                  case "resize-SE": lxOpp = -bak.rx; lyOpp = -bak.ry; break;
+                  case "resize-SW": lxOpp =  bak.rx; lyOpp = -bak.ry; break;
+               }
+               var oppX = bak.cx + lxOpp * co - lyOpp * si;
+               var oppY = bak.cy + lxOpp * si + lyOpp * co;
+               // New center is midpoint of cursor and opposite corner.
+               var newCx = (p.x + oppX) / 2;
+               var newCy = (p.y + oppY) / 2;
+               // Vector from new center to cursor, transformed to local.
+               var vx = p.x - newCx, vy = p.y - newCy;
+               var ico = Math.cos( -bak.angle ), isi = Math.sin( -bak.angle );
+               var lx = vx * ico - vy * isi;
+               var ly = vx * isi + vy * ico;
+               s.cx    = newCx;
+               s.cy    = newCy;
+               s.rx    = Math.max( 1, Math.abs( lx ) );
+               s.ry    = Math.max( 1, Math.abs( ly ) );
+               s.angle = bak.angle;
+            }
             scheduleUpdate();
          }
       }
 
-      // Always repaint so the brush-cursor ring follows the mouse.
       if ( data.maskTool !== "pan" )
          self.repaint();
    };
 
    this.onMouseRelease = function( x, y, button, buttons, modifiers )
    {
-      if ( self._panning )
+      if ( self._dragMode === "pan" )
       {
-         self._panning = false;
-         self.cursor = new Cursor( StdCursor_OpenHand );
+         self._dragMode = null;
+         self._panning  = false;
+         self.cursor    = new Cursor( StdCursor_OpenHand );
          return;
       }
-
-      if ( self._drawStart == null )
-         return;
-
-      var sx = self._drawStart.x,   sy = self._drawStart.y;
-      var ex = self._drawCurrent.x, ey = self._drawCurrent.y;
-      var bw = self.bitmap ? self.bitmap.width : 0;
-      var feathr = pctToPx( data.maskFeatherPct, bw );
-
-      if ( data.maskTool === "ellipse" )
+      if ( data.maskTool === "brush" )
       {
-         var cx = (sx + ex) / 2;
-         var cy = (sy + ey) / 2;
-         var rx = Math.abs( ex - sx ) / 2;
-         var ry = Math.abs( ey - sy ) / 2;
-         if ( rx >= 1 && ry >= 1 )
-            paintEllipseToMask( cx, cy, rx, ry, feathr );
+         // Rebuild overlay once on release, not on every move.
+         rebuildMaskOverlay();
       }
-      else if ( data.maskTool === "rect" )
-      {
-         var x1 = Math.min( sx, ex ), x2 = Math.max( sx, ex );
-         var y1 = Math.min( sy, ey ), y2 = Math.max( sy, ey );
-         if ( x2 - x1 >= 1 && y2 - y1 >= 1 )
-            paintRectToMask( x1, y1, x2, y2, feathr );
-      }
-      // Brush already painted incrementally on move.
-
-      self._drawStart   = null;
-      self._drawCurrent = null;
-      rebuildMaskOverlay();
+      self._dragMode     = null;
+      self._dragShapeBak = null;
       scheduleUpdate();
       self.repaint();
    };
@@ -1561,12 +1923,35 @@ function CombinerDialog()
       "Off / Pan view: classic preview navigation (drag to pan).";
    this.maskToolCombo.onItemSelected = function( idx )
    {
-      data.maskTool = ["pan","ellipse","rect","brush"][ idx ];
+      var newTool = ["pan","ellipse","rect","brush"][ idx ];
+      // When switching AWAY from an editable-shape tool, auto-commit
+      // any active shape so the user doesn't lose work.
+      if ( newTool !== data.maskTool && data.activeShape != null )
+      {
+         commitActiveShape();
+         rebuildMaskOverlay();
+      }
+      data.maskTool = newTool;
       if ( self.previewFrame )
       {
          self.previewFrame.refreshCursor();
          self.previewFrame.repaint();
       }
+      scheduleUpdate();
+   };
+
+   this.maskCommitBtn = new PushButton( this );
+   this.maskCommitBtn.text    = "Commit Shape";
+   this.maskCommitBtn.toolTip =
+      "Bake the current editable ellipse / rectangle into the mask " +
+      "and clear it. After commit you can draw a new shape on top.";
+   this.maskCommitBtn.onClick = function()
+   {
+      if ( data.activeShape == null ) return;
+      commitActiveShape();
+      rebuildMaskOverlay();
+      if ( self.previewFrame ) self.previewFrame.repaint();
+      scheduleUpdate();
    };
 
    this.maskInvertCheck = new CheckBox( this );
@@ -1584,9 +1969,11 @@ function CombinerDialog()
 
    this.maskClearBtn = new PushButton( this );
    this.maskClearBtn.text    = "Clear Mask";
-   this.maskClearBtn.toolTip = "Reset the mask: stars are restored everywhere.";
+   this.maskClearBtn.toolTip = "Reset the mask and discard the editable shape: " +
+                               "stars are restored everywhere.";
    this.maskClearBtn.onClick = function()
    {
+      data.activeShape = null;
       clearMask();
       if ( self.previewFrame )
          self.previewFrame.repaint();
@@ -1598,6 +1985,7 @@ function CombinerDialog()
    maskToolRow.add( maskToolLabel );
    maskToolRow.add( this.maskToolCombo, 100 );
    maskToolRow.add( this.maskInvertCheck );
+   maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
 
    // Row 2: Mask Strength slider

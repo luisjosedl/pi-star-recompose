@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.15"
+#define VERSION       "1.1.16"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -692,19 +692,24 @@ function rebuildPendingOverlay()
    }
    try
    {
-      // Pink = (255, 102, 170), Cyan = (102, 204, 255).
+      // Boosted vivid pink / cyan so the pending overlay shows up
+      // even on bright preview pixels. Output channels are clamped
+      // to 1 by PixelMath's truncate setting (newImage*Format=3 +
+      // truncate=true), so values >1 just saturate gracefully.
       var rExpr, gExpr, bExpr;
       if ( data.maskInvert )
       {
-         rExpr = "0.4*" + ID_MASK_PENDING;
-         gExpr = "0.8*" + ID_MASK_PENDING;
-         bExpr = ID_MASK_PENDING;
+         // Vivid cyan-ish blue.
+         rExpr = "0.20*" + ID_MASK_PENDING;
+         gExpr = "1.10*" + ID_MASK_PENDING;
+         bExpr = "1.50*" + ID_MASK_PENDING;
       }
       else
       {
-         rExpr = ID_MASK_PENDING;
-         gExpr = "0.4*" + ID_MASK_PENDING;
-         bExpr = "0.65*" + ID_MASK_PENDING;
+         // Vivid hot pink / magenta.
+         rExpr = "1.50*" + ID_MASK_PENDING;
+         gExpr = "0.20*" + ID_MASK_PENDING;
+         bExpr = "0.70*" + ID_MASK_PENDING;
       }
       var pm = new PixelMath;
       pm.useSingleExpression  = false;
@@ -716,6 +721,9 @@ function rebuildPendingOverlay()
       pm.newImageColorSpace   = 1;
       pm.newImageSampleFormat = 3;
       pm.showNewImage         = false;
+      pm.truncate             = true;
+      pm.truncateLower        = 0.0;
+      pm.truncateUpper        = 1.0;
       pm.executeOn( pw.mainView, false );
       refreshViewCombos();
       var ow = ImageWindow.windowById( ID_OVERLAY_PEND );
@@ -808,43 +816,6 @@ function paintEllipseToWindow( targetWindow, cx, cy, rx, ry, feather, gc )
    pm.truncateLower       = 0.0;
    pm.truncateUpper       = 1.0;
    pm.executeOn( targetWindow.mainView, false );
-}
-
-// Back-compat wrapper: paints into the persistent (committed) MASK.
-function paintEllipseToMask( cx, cy, rx, ry, feather )
-{
-   paintEllipseToWindow( ensureMaskWindow(), cx, cy, rx, ry, feather,
-                         data.maskGradientCtr );
-}
-
-// Paint a feathered axis-aligned rectangle into the mask.
-// Inside the rectangle the value is 1; outside it falls off linearly
-// to 0 over `feather` pixels measured perpendicular to the edges.
-function paintRectToMask( x1, y1, x2, y2, feather )
-{
-   var w = ensureMaskWindow();
-   if ( w == null ) return;
-   if ( x1 > x2 ) { var tx = x1; x1 = x2; x2 = tx; }
-   if ( y1 > y2 ) { var ty = y1; y1 = y2; y2 = ty; }
-   var f = Math.max( 0.5, feather );
-
-   var dx = "max(0,max(" + x1.toFixed( 2 ) + "-x(),x()-" + x2.toFixed( 2 ) + "))";
-   var dy = "max(0,max(" + y1.toFixed( 2 ) + "-y(),y()-" + y2.toFixed( 2 ) + "))";
-   var dist  = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
-   var value = "max(0,min(1,1-" + dist + "/" + f.toFixed( 4 ) + "))";
-
-   var pm = new PixelMath;
-   pm.expression          = "max($T," + value + ")";
-   pm.useSingleExpression = true;
-   pm.createNewImage      = false;
-   pm.generateOutput      = true;
-   pm.singleThreaded      = false;
-   pm.optimization        = true;
-   pm.rescale             = false;
-   pm.truncate            = true;
-   pm.truncateLower       = 0.0;
-   pm.truncateUpper       = 1.0;
-   pm.executeOn( w.mainView, false );
 }
 
 // Paint a feathered circle (brush stroke) into the PENDING mask
@@ -2098,10 +2069,12 @@ function PreviewFrame( parent )
          self.cursor    = new Cursor( StdCursor_OpenHand );
          return;
       }
-      if ( data.maskTool === "brush" || data.maskTool === "eraser" )
+      // Rebuild both overlays + clear the trail whenever a stroke
+      // was actually in progress, even if the user switched tool
+      // mid-drag via the combo box.
+      if ( self._brushTrail.length > 0
+        || data.maskTool === "brush" || data.maskTool === "eraser" )
       {
-         // Rebuild both overlays once on release, then clear the
-         // real-time trail. Pending = pink/cyan, Mask = red.
          rebuildMaskOverlay();
          rebuildPendingOverlay();
          self._brushTrail = [];
@@ -2474,7 +2447,9 @@ function CombinerDialog()
    this.maskCommitBtn.toolTip =
       "Bake the current editable shape AND all pending brush strokes " +
       "into the persistent mask, then clear them. Pending edits show " +
-      "in pink/cyan; committed mask shows in red. Shortcut: ENTER.";
+      "in pink/cyan; committed mask shows in red.\n" +
+      "Shortcuts: ENTER = commit, ESC = discard shape, " +
+      "SHIFT+ESC = discard pending brush, DEL = clear all.";
    this.maskCommitBtn.onClick = function()
    {
       if ( !hasPendingEdits() ) return;
@@ -2631,33 +2606,34 @@ function CombinerDialog()
          self.previewFrame.repaint();
    };
 
-   // Gradient Center slider: where inside the shape the falloff starts.
-   // 100% = solid until boundary (current default; sharpest center).
-   //   0% = gradient from center to outside (no solid zone).
+   // Gradient Center slider: where inside the shape the falloff starts,
+   // expressed as a percentage (0..100). 100% = solid until boundary
+   // (default), 0% = pure radial gradient from the center.
    this.gradientCtrNC = new NumericControl( this );
    this.gradientCtrNC.label.text          = "Gradient Center:";
    this.gradientCtrNC.label.setFixedWidth( labelWidth );
    this.gradientCtrNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-   this.gradientCtrNC.setRange( 0.0, 1.0 );
+   this.gradientCtrNC.setRange( 0.0, 100.0 );
    this.gradientCtrNC.slider.setRange( 0, 1000 );
    this.gradientCtrNC.slider.scaledMinWidth = 360;
-   this.gradientCtrNC.setPrecision( 2 );
-   this.gradientCtrNC.setValue( data.maskGradientCtr );
+   this.gradientCtrNC.setPrecision( 0 );
+   this.gradientCtrNC.setValue( data.maskGradientCtr * 100.0 );
    this.gradientCtrNC.edit.minWidth = 70;
    this.gradientCtrNC.toolTip =
-      "Where inside the shape the gradient starts, as a fraction of the " +
-      "shape's radius.\n" +
-      "1.0 = solid mask=1 until the boundary, then falloff outside " +
+      "Where inside the shape the gradient starts, as a percentage of " +
+      "the shape's radius.\n" +
+      "100% = solid mask=1 until the boundary, then falloff outside " +
       "over Feather pixels (default).\n" +
-      "0.0 = gradient from the center, no solid zone.\n" +
-      "0.5 = solid until half radius, gradient from there outward.\n" +
+      "0% = gradient from the center, no solid zone.\n" +
+      "50% = solid until half radius, gradient from there outward.\n" +
       "Verify the result by switching the Preview View to 'Mask only (B/W)'.";
    this.gradientCtrNC.onValueUpdated = function( v )
    {
-      data.maskGradientCtr = v;
+      var frac = v / 100.0;
+      data.maskGradientCtr = frac;
       // Live-update the active shape so the change is visible.
       if ( data.activeShape != null )
-         data.activeShape.gradientCenter = v;
+         data.activeShape.gradientCenter = frac;
       scheduleUpdate();
    };
 
@@ -2750,9 +2726,19 @@ function CombinerDialog()
    this.onKeyPress = function( keyCode, modifiers )
    {
       var handled = false;
+      var shiftDown = !!(modifiers & KeyModifier_Shift);
       if ( keyCode === Key_Escape )
       {
-         if ( data.activeShape != null )
+         if ( shiftDown && pendingMaskIsActive() )
+         {
+            // SHIFT+ESC: discard pending brush strokes only.
+            clearMaskPending();
+            updateCommitButton();
+            if ( self.previewFrame ) self.previewFrame.repaint();
+            scheduleUpdate();
+            handled = true;
+         }
+         else if ( data.activeShape != null )
          {
             discardActiveShape();
             updateCommitButton();

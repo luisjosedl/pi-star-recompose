@@ -21,10 +21,10 @@
       <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.1.9.tar.gz"
-               sha1="4a5104d63588242f9c8a383baad3857e63b17930"
+      <package fileName="pkg/AstroDL-StarRecompose-1.1.10.tar.gz"
+               sha1="95c07294a55ce38ed0c75fe5bf45bf884bdb8503"
                type="script"
-               releaseDate="20260516">
+               releaseDate="20260517">
          <title>AstroDL - Star Recompose</title>
          <description>
             <p>Star Recompose v1.1 &mdash; combines a stretched starless

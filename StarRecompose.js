@@ -63,11 +63,12 @@
 #include <pjsr/StdCursor.jsh>
 #include <pjsr/TextAlign.jsh>
 #include <pjsr/UndoFlag.jsh>
+#include <pjsr/KeyCodes.jsh>
 
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.12"
+#define VERSION       "1.1.13"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -136,7 +137,12 @@ function CombinerData()
    this.brushRadiusPct   = BRUSH_RADIUS_DEF;
    this.maskInvert       = false;
    this.maskOverlayBitmap = null;     // cached visualization bitmap
-   this.showMaskView     = false;     // show mask as B/W instead of preview
+   // View mode for the preview area:
+   //   "preview" : recombined image only (clean, no red overlay)
+   //   "blend"   : recombined image + red mask overlay (default; lets you
+   //               see what the mask covers while editing)
+   //   "mask"    : just the mask in grayscale (black = 0, white = 1)
+   this.viewMode         = "blend";
 
    // Active editable shape (one at a time, drawn with the Ellipse or
    // Rect tool). Can be moved / resized / rotated until the user
@@ -888,6 +894,60 @@ function pointInActiveShape( px, py )
    return Math.abs( lx ) < s.rx && Math.abs( ly ) < s.ry;
 }
 
+// Discard the active shape without committing (e.g. user pressed ESC,
+// or made a 1-pixel click without a meaningful drag).
+function discardActiveShape()
+{
+   data.activeShape = null;
+}
+
+// Visual accent colors for the active shape and brush ring. Pink in
+// normal mode (the mask REMOVES stars in painted areas), cyan in
+// invert mode (the mask KEEPS stars in painted areas - opposite
+// semantics, hence opposite color).
+function maskAccentPen()
+{
+   return data.maskInvert ? 0xff66ccff : 0xffff66aa;
+}
+function maskAccentFill()
+{
+   return data.maskInvert ? 0x6666ccff : 0x66ff66aa;
+}
+function maskAccentSolid()
+{
+   return data.maskInvert ? 0xff66ccff : 0xffff66aa;
+}
+
+// Update the Commit button text + enabled state to reflect whether
+// there is an editable active shape ready to bake.
+function updateCommitButton()
+{
+   if ( ui == null || ui.maskCommitBtn == null ) return;
+   if ( data.activeShape != null )
+   {
+      ui.maskCommitBtn.text    = "Commit Shape";
+      ui.maskCommitBtn.enabled = true;
+   }
+   else
+   {
+      ui.maskCommitBtn.text    = "(no shape)";
+      ui.maskCommitBtn.enabled = false;
+   }
+}
+
+// Show or hide the three mask parameter rows based on the current tool.
+// When the user has the Pan view selected (mask "off"), the rows are
+// hidden to declutter the dialog.
+function updateMaskRowsVisibility()
+{
+   if ( ui == null ) return;
+   var visible = (data.maskTool !== "pan");
+   if ( ui.maskStrengthNC ) ui.maskStrengthNC.visible = visible;
+   if ( ui.maskFeatherNC  ) ui.maskFeatherNC.visible  = visible;
+   if ( ui.brushRadiusNC  )
+      ui.brushRadiusNC.visible = (data.maskTool === "brush");
+}
+
 // Run the full pipeline:
 // copy stars -> arcsinh -> (sat + scnr) -> combine (with optional mask).
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
@@ -929,12 +989,12 @@ function updatePreview()
       data.starsProc    = ensureMatchingWindow( ID_STP_SMALL, slIm );
       data.previewSmall = ensureMatchingWindow( ID_PV_SMALL,  slIm );
 
-      if ( data.showMaskView )
+      if ( data.viewMode === "mask" )
       {
          // Render the effective mask (raster + active shape) as a
-         // grayscale image in the preview window. With a scalar
-         // PixelMath expression on a multi-channel target the value
-         // is broadcast to R = G = B, so the result reads as B/W.
+         // grayscale image into the preview window. A scalar PixelMath
+         // expression broadcast to a multi-channel target gives R=G=B
+         // (i.e. B/W).
          var maskId    = maskIsActive() ? ID_MASK : null;
          var activeExp = (data.activeShape != null) ? activeShapeMaskExpr() : null;
          var eff       = buildEffectiveMaskExpr( maskId, activeExp );
@@ -950,6 +1010,8 @@ function updatePreview()
       }
       else
       {
+         // "preview" and "blend" both run the normal pipeline. The
+         // visual difference (overlay or not) is handled by onPaint.
          var isColor = data.starlessSmall.mainView.image.numberOfChannels > 1
                     && data.starsSmall.mainView.image.numberOfChannels   > 1;
 
@@ -1010,9 +1072,10 @@ function applyFinal()
       ID_TMP_FULL );
    refreshViewCombos();
 
-   var success     = false;
-   var errMessage  = "";
-   var keptStarsId = "";
+   var success        = false;
+   var errMessage     = "";
+   var keptStarsId    = "";
+   var maskFullWindow = null;      // hoisted so finally can close it
    try
    {
       // Copy stars at full res into the temp window and run the stretch
@@ -1031,7 +1094,6 @@ function applyFinal()
       // dimensions. Build the active-shape full-res inline expression
       // by rescaling shape parameters (which were in preview coords)
       // to full-res coords.
-      var maskFullWindow = null;
       var maskExpr       = "";
       if ( data.maskStrength > 0 )
       {
@@ -1093,10 +1155,6 @@ function applyFinal()
       pm.newImageSampleFormat = 3;
       pm.showNewImage         = true;
       pm.executeOn( data.starlessView, false );
-
-      if ( maskFullWindow != null )
-         maskFullWindow.forceClose();
-
       success = true;
    }
    catch ( e )
@@ -1105,6 +1163,14 @@ function applyFinal()
    }
    finally
    {
+      // Always close the temporary full-res mask, even if the combine
+      // PixelMath threw partway through.
+      if ( maskFullWindow != null )
+      {
+         try { maskFullWindow.forceClose(); } catch ( ce ) { /* ignore */ }
+         maskFullWindow = null;
+      }
+
       // Either keep the stretched-stars image (renamed) or discard.
       if ( success && data.keepStars )
       {
@@ -1288,10 +1354,10 @@ function PreviewFrame( parent )
          g.drawScaledBitmap( destRect, self.bitmap );
 
          // Mask overlay (red-tinted, additive blend so black areas
-         // remain transparent against the preview). Skipped when the
-         // user is viewing the mask in B/W mode, since the preview
-         // already IS the mask.
-         if ( data.maskOverlayBitmap != null && !data.showMaskView )
+         // remain transparent against the preview). Drawn only in
+         // "blend" mode. Skipped in "preview" (clean) and "mask" (the
+         // preview already IS the mask).
+         if ( data.maskOverlayBitmap != null && data.viewMode === "blend" )
          {
             try
             {
@@ -1302,11 +1368,11 @@ function PreviewFrame( parent )
             catch ( ce ) { /* fall through quietly */ }
          }
 
-         // Active shape (editable): outline + handles. Drawn on top of
-         // the mask overlay so the user can always see and grab it.
+         // Active shape (editable): filled outline + handles. Drawn on
+         // top of any overlay so the user can always see and grab it.
+         // Only shown for the geometric tools (ellipse / rect).
          if ( data.activeShape != null
-           && (data.maskTool === "ellipse" || data.maskTool === "rect" ||
-               data.activeShape != null) )
+           && (data.maskTool === "ellipse" || data.maskTool === "rect") )
          {
             var s = data.activeShape;
             // Build polygon points around the shape's local rim.
@@ -1340,11 +1406,10 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Translucent pink fill + bright pink outline. The fill
-            // makes the active (editable) shape visually distinct from
-            // the red overlay of committed mask regions.
-            g.pen   = new Pen( 0xffff66aa, 2.0 );
-            g.brush = new Brush( 0x66ff66aa );
+            // Translucent fill + bright outline. Color depends on the
+            // Invert flag: pink = removes stars, cyan = keeps stars.
+            g.pen   = new Pen( maskAccentPen(), 2.0 );
+            g.brush = new Brush( maskAccentFill() );
             g.drawPolygon( pts );
 
             // Draw the 4 corner handles + the rotation handle.
@@ -1361,9 +1426,7 @@ function PreviewFrame( parent )
                   g.brush = new Brush( 0xff336633 );
                   g.drawEllipse( new Rect( hc.x0 - 6, hc.y0 - 6,
                                            hc.x0 + 6, hc.y0 + 6 ) );
-                  // Stem connecting to the shape.
-                  var topImg = handles[0];   // NW handle as proxy for "above"
-                  // Better: top center of shape.
+                  // Stem connecting to the top center of the shape.
                   var localTopX = 0, localTopY = -s.ry;
                   var topWx = s.cx + localTopX * co - localTopY * si;
                   var topWy = s.cy + localTopX * si + localTopY * co;
@@ -1373,25 +1436,39 @@ function PreviewFrame( parent )
                }
                else
                {
-                  // Pink filled squares for resize.
+                  // Filled squares for resize, accent color.
                   g.pen   = new Pen( 0xffffffff, 1.5 );
-                  g.brush = new Brush( 0xffff66aa );
+                  g.brush = new Brush( maskAccentSolid() );
                   g.drawRect( new Rect( hc.x0 - 5, hc.y0 - 5,
                                         hc.x0 + 5, hc.y0 + 5 ) );
                }
             }
          }
 
-         // Brush cursor ring when the brush tool is active.
+         // Brush cursor ring when the brush tool is active. Two rings:
+         // solid = brush radius, dashed = brush radius + feather (where
+         // the painted alpha falls off to zero).
          if ( data.maskTool === "brush" && self._cursorImg != null )
          {
-            var radPx = pctToPx( data.brushRadiusPct, bw );
-            var cRect = self._imageRectToCanvas(
-               self._cursorImg.x - radPx, self._cursorImg.y - radPx,
-               self._cursorImg.x + radPx, self._cursorImg.y + radPx );
-            g.pen = new Pen( 0xffff66aa, 1.5 );
+            var radPx    = pctToPx( data.brushRadiusPct, bw );
+            var feathPx  = pctToPx( data.maskFeatherPct, bw );
+            var cInner = self._imageRectToCanvas(
+               self._cursorImg.x - radPx,         self._cursorImg.y - radPx,
+               self._cursorImg.x + radPx,         self._cursorImg.y + radPx );
+            var cOuter = self._imageRectToCanvas(
+               self._cursorImg.x - (radPx+feathPx), self._cursorImg.y - (radPx+feathPx),
+               self._cursorImg.x + (radPx+feathPx), self._cursorImg.y + (radPx+feathPx) );
             g.brush = new Brush( 0x00000000 );
-            g.drawEllipse( cRect );
+            g.pen   = new Pen( maskAccentPen(), 1.5 );
+            g.drawEllipse( cInner );
+            if ( feathPx > 0.5 )
+            {
+               // Dashed outer ring for the feather edge.
+               var dashPen = new Pen( maskAccentPen(), 1.0 );
+               try { dashPen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
+               g.pen = dashPen;
+               g.drawEllipse( cOuter );
+            }
          }
       }
       finally
@@ -1575,6 +1652,7 @@ function PreviewFrame( parent )
       self._drawStart   = p;
       self._drawCurrent = p;
       self._cursorImg   = p;
+      updateCommitButton();
       self.repaint();
    };
 
@@ -1694,8 +1772,17 @@ function PreviewFrame( parent )
          // Rebuild overlay once on release, not on every move.
          rebuildMaskOverlay();
       }
+      // If the user just clicked (no real drag) on an empty area with
+      // the geometric tools, discard the tiny placeholder shape so a
+      // 1-pixel "ghost" doesn't haunt the canvas.
+      if ( self._dragMode === "draw" && data.activeShape != null
+        && data.activeShape.rx < 3 && data.activeShape.ry < 3 )
+      {
+         discardActiveShape();
+      }
       self._dragMode     = null;
       self._dragShapeBak = null;
+      updateCommitButton();
       scheduleUpdate();
       self.repaint();
    };
@@ -1744,6 +1831,12 @@ function CombinerDialog()
       data.starlessView = view;
       closeWindowById( ID_STP_SMALL );
       closeWindowById( ID_PV_SMALL );
+      // Discard any mask state - its coordinates were referred to the
+      // PREVIOUS view's cache, which would be meaningless against a
+      // new starless of potentially different size.
+      discardActiveShape();
+      closeWindowById( ID_MASK );
+      data.maskOverlayBitmap = null;
       if ( view == null || view.isNull )
       {
          closeWindowById( ID_SL_SMALL );
@@ -1755,6 +1848,7 @@ function CombinerDialog()
          data.starlessSmall = buildSmall( view, ID_SL_SMALL, __cacheSize );
          if ( self.previewFrame ) self.previewFrame.fitToFrame();
       }
+      updateCommitButton();
       scheduleUpdate();
    };
 
@@ -1786,6 +1880,30 @@ function CombinerDialog()
       }
       scheduleUpdate();
    };
+
+   // Validate that starless and stars have matching channel counts.
+   // Mixed (one color, one grayscale) produces silent PixelMath errors
+   // in the combine. Warn the user but allow them to continue.
+   function validateChannels()
+   {
+      if ( data.starlessView == null || data.starlessView.isNull ) return;
+      if ( data.starsView    == null || data.starsView.isNull )    return;
+      var slC = data.starlessView.image.numberOfChannels;
+      var stC = data.starsView.image.numberOfChannels;
+      if ( (slC > 1) !== (stC > 1) )
+      {
+         console.warningln( "* WARNING: starless has " + slC +
+                            " channel(s), stars has " + stC +
+                            ". Mixing color and grayscale may produce " +
+                            "unexpected results." );
+      }
+   }
+   this.starlessViewList.onViewSelected = (function( orig ) {
+      return function( view ) { orig( view ); validateChannels(); };
+   })( this.starlessViewList.onViewSelected );
+   this.starsViewList.onViewSelected = (function( orig ) {
+      return function( view ) { orig( view ); validateChannels(); };
+   })( this.starsViewList.onViewSelected );
 
    this.resetBtn = new PushButton( this );
    this.resetBtn.text    = "Reset";
@@ -2000,6 +2118,8 @@ function CombinerDialog()
          rebuildMaskOverlay();
       }
       data.maskTool = newTool;
+      updateMaskRowsVisibility();
+      updateCommitButton();
       if ( self.previewFrame )
       {
          self.previewFrame.refreshCursor();
@@ -2010,14 +2130,17 @@ function CombinerDialog()
 
    this.maskCommitBtn = new PushButton( this );
    this.maskCommitBtn.text    = "Commit Shape";
+   this.maskCommitBtn.enabled = false;
    this.maskCommitBtn.toolTip =
       "Bake the current editable ellipse / rectangle into the mask " +
-      "and clear it. After commit you can draw a new shape on top.";
+      "and clear it. After commit you can draw a new shape on top. " +
+      "Shortcut: ENTER.";
    this.maskCommitBtn.onClick = function()
    {
       if ( data.activeShape == null ) return;
       commitActiveShape();
       rebuildMaskOverlay();
+      updateCommitButton();
       if ( self.previewFrame ) self.previewFrame.repaint();
       scheduleUpdate();
    };
@@ -2026,37 +2149,53 @@ function CombinerDialog()
    this.maskInvertCheck.text    = "Invert";
    this.maskInvertCheck.checked = data.maskInvert;
    this.maskInvertCheck.toolTip =
-      "When checked, the mask SHOWS stars only inside the painted area " +
-      "and hides them everywhere else - useful to keep stars only on a " +
-      "specific region (e.g. a galaxy core) and remove them around it.";
+      "When checked, the mask KEEPS stars only inside the painted area " +
+      "and removes them everywhere else - useful to keep stars only on " +
+      "a specific region (e.g. a galaxy core) and remove them around " +
+      "it. The active shape and brush ring show cyan in invert mode.";
    this.maskInvertCheck.onCheck = function( c )
    {
       data.maskInvert = c;
       scheduleUpdate();
+      if ( self.previewFrame ) self.previewFrame.repaint();
    };
 
-   this.maskViewCheck = new CheckBox( this );
-   this.maskViewCheck.text    = "B/W View";
-   this.maskViewCheck.checked = data.showMaskView;
-   this.maskViewCheck.toolTip =
-      "Show the mask itself in black and white instead of the recombined " +
-      "preview. Black = stars are unchanged (mask = 0), white = stars are " +
-      "fully attenuated (mask = 1). Useful to verify exactly what the " +
-      "mask covers before clicking Apply.";
-   this.maskViewCheck.onCheck = function( c )
+   // 3-mode view selector for the preview canvas.
+   var viewModeLabel = new Label( this );
+   viewModeLabel.text          = "View:";
+   viewModeLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+
+   this.viewModeCombo = new ComboBox( this );
+   this.viewModeCombo.editEnabled = false;
+   this.viewModeCombo.addItem( "Preview only" );          // 0
+   this.viewModeCombo.addItem( "Preview + Mask blend" );  // 1
+   this.viewModeCombo.addItem( "Mask only (B/W)" );       // 2
+   this.viewModeCombo.currentItem =
+        (data.viewMode === "preview") ? 0
+      : (data.viewMode === "mask"   ) ? 2 : 1;
+   this.viewModeCombo.toolTip =
+      "Preview only: clean recombined image, no red overlay.\n" +
+      "Preview + Mask blend: recombined image with a red tint showing " +
+      "the mask coverage (default; useful for aligning shapes to " +
+      "features).\n" +
+      "Mask only: shows the mask itself in black and white, useful to " +
+      "verify exactly what the mask covers before clicking Apply.";
+   this.viewModeCombo.onItemSelected = function( idx )
    {
-      data.showMaskView = c;
+      data.viewMode = ["preview","blend","mask"][ idx ];
       scheduleUpdate();
+      if ( self.previewFrame ) self.previewFrame.repaint();
    };
 
    this.maskClearBtn = new PushButton( this );
    this.maskClearBtn.text    = "Clear Mask";
    this.maskClearBtn.toolTip = "Reset the mask and discard the editable shape: " +
-                               "stars are restored everywhere.";
+                               "stars are restored everywhere. Shortcut: DEL.";
    this.maskClearBtn.onClick = function()
    {
-      data.activeShape = null;
+      discardActiveShape();
       clearMask();
+      updateCommitButton();
       if ( self.previewFrame )
          self.previewFrame.repaint();
       scheduleUpdate();
@@ -2067,9 +2206,19 @@ function CombinerDialog()
    maskToolRow.add( maskToolLabel );
    maskToolRow.add( this.maskToolCombo, 100 );
    maskToolRow.add( this.maskInvertCheck );
-   maskToolRow.add( this.maskViewCheck );
    maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
+
+   // A second row for the view-mode selector. Kept separate from the
+   // mask tool row so the tool row stays compact.
+   var viewModeRow = new HorizontalSizer;
+   viewModeRow.spacing = 4;
+   var viewModeLabelFixed = new Label( this );
+   viewModeLabelFixed.text          = "Preview View:";
+   viewModeLabelFixed.setFixedWidth( labelWidth );
+   viewModeLabelFixed.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   viewModeRow.add( viewModeLabelFixed );
+   viewModeRow.add( this.viewModeCombo, 100 );
 
    // Row 2: Mask Strength slider
    this.maskStrengthNC = new NumericControl( this );
@@ -2109,6 +2258,17 @@ function CombinerDialog()
    this.maskFeatherNC.onValueUpdated = function( v )
    {
       data.maskFeatherPct = v;
+      // Live-update the active shape so the user sees the new feather
+      // immediately, without having to redraw the shape. Existing
+      // committed (raster-baked) shapes keep the feather they had at
+      // paint time and are not affected.
+      if ( data.activeShape != null && data.starlessSmall != null )
+      {
+         var bw = data.starlessSmall.mainView.image.width;
+         data.activeShape.feather = pctToPx( v, bw );
+         scheduleUpdate();
+      }
+      if ( self.previewFrame ) self.previewFrame.repaint();
    };
 
    this.brushRadiusNC = new NumericControl( this );
@@ -2146,7 +2306,8 @@ function CombinerDialog()
    this.outIdEdit.toolTip = "ID of the final combined image created by Apply.";
    this.outIdEdit.onEditCompleted = function()
    {
-      data.outputId = this.text.length > 0 ? this.text : "Combined";
+      if ( this.text.length === 0 ) this.text = "Combined";
+      data.outputId = this.text;
    };
 
    this.applyBtn = new PushButton( this );
@@ -2203,12 +2364,59 @@ function CombinerDialog()
    this.sizer.add( scnrRow );
    this.sizer.add( keepRow );
    this.sizer.add( maskToolRow );
+   this.sizer.add( viewModeRow );
    this.sizer.add( this.maskStrengthNC );
    this.sizer.add( this.maskFeatherNC );
    this.sizer.add( this.brushRadiusNC );
    this.sizer.add( this.previewFrame, 100 );
    this.sizer.add( btmRow );
    this.sizer.add( this.creditLabel );
+
+   // Keyboard shortcuts for mask editing:
+   //   ESC    : discard the active shape (silently, without committing)
+   //   ENTER  : commit the active shape (same as Commit Shape button)
+   //   DELETE : clear the entire mask (same as Clear Mask button)
+   this.onKeyPress = function( keyCode, modifiers )
+   {
+      var handled = false;
+      if ( keyCode === Key_Escape )
+      {
+         if ( data.activeShape != null )
+         {
+            discardActiveShape();
+            updateCommitButton();
+            if ( self.previewFrame ) self.previewFrame.repaint();
+            scheduleUpdate();
+            handled = true;
+         }
+      }
+      else if ( keyCode === Key_Return || keyCode === Key_Enter )
+      {
+         if ( data.activeShape != null )
+         {
+            commitActiveShape();
+            rebuildMaskOverlay();
+            updateCommitButton();
+            if ( self.previewFrame ) self.previewFrame.repaint();
+            scheduleUpdate();
+            handled = true;
+         }
+      }
+      else if ( keyCode === Key_Delete )
+      {
+         discardActiveShape();
+         clearMask();
+         updateCommitButton();
+         if ( self.previewFrame ) self.previewFrame.repaint();
+         scheduleUpdate();
+         handled = true;
+      }
+      return handled;
+   };
+
+   // Apply initial visibility / button state to match the default tool.
+   updateMaskRowsVisibility();
+   updateCommitButton();
 
    this.adjustToContents();
    this.setMinSize( 680, 900 );

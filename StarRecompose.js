@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.14"
+#define VERSION       "1.1.15"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -85,16 +85,23 @@
 #define ID_STP_SMALL  "__AD_stars_proc"
 #define ID_PV_SMALL   "__AD_preview"
 #define ID_TMP_FULL   "__AD_proc_full"
-#define ID_MASK       "__AD_mask"
-#define ID_MASK_FULL  "__AD_mask_full"
-#define ID_OVERLAY    "__AD_overlay"
+#define ID_MASK         "__AD_mask"          // committed (red overlay)
+#define ID_MASK_PENDING "__AD_mask_pend"     // brush/eraser pending (pink/cyan overlay)
+#define ID_MASK_FULL    "__AD_mask_full"
+#define ID_OVERLAY      "__AD_overlay"
+#define ID_OVERLAY_PEND "__AD_overlay_pend"
 
 // Mask defaults. Strength: 0..1, how much the mask attenuates the
 // stars. Feather/Brush radii are expressed as a percentage of the
 // image width so the visual size is resolution-independent.
-#define MASK_STRENGTH_DEF   1.0
-#define MASK_FEATHER_DEF    2.0      // percent of image width
-#define BRUSH_RADIUS_DEF    5.0      // percent of image width
+// GradientCenter: 0..1, fraction of the shape's radius where the
+// solid (mask=1) zone ends and the falloff to 0 begins. 1.0 means
+// the shape is fully solid until its boundary (current behavior);
+// 0.0 means the gradient starts from the center (no solid zone).
+#define MASK_STRENGTH_DEF    1.0
+#define MASK_FEATHER_DEF     2.0      // percent of image width
+#define BRUSH_RADIUS_DEF     5.0      // percent of image width
+#define GRADIENT_CENTER_DEF  1.0      // 0..1 (slider shows it as %)
 
 // Slider ranges. STRETCH maps DIRECTLY to ArcsinhStretch.stretch (no
 // hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint.
@@ -131,11 +138,13 @@ function CombinerData()
    this.starsOutputId    = "Stars_Stretched";
 
    // Mask state (session-only, not persisted in the script instance).
-   this.maskTool         = "pan";    // "pan" | "ellipse" | "rect" | "brush"
+   this.maskTool         = "pan";    // "pan" | "ellipse" | "rect" | "brush" | "eraser"
    this.maskStrength     = MASK_STRENGTH_DEF;
    this.maskFeatherPct   = MASK_FEATHER_DEF;
    this.brushRadiusPct   = BRUSH_RADIUS_DEF;
+   this.maskGradientCtr  = GRADIENT_CENTER_DEF;  // 0..1, "solid core" fraction
    this.maskInvert       = false;
+   this.maskPendingOverlayBitmap = null;
    this.maskOverlayBitmap = null;     // cached visualization bitmap
    // View mode for the preview area:
    //   "preview" : recombined image only (clean, no red overlay)
@@ -492,15 +501,19 @@ function applySCNR( view )
    P.executeOn( view, false );
 }
 
-// Build the "effective mask" sub-expression, combining the raster
-// mask (if it exists) with the active shape's inline expression
-// (if there is one) via max(). Returns null if neither contributes.
-function buildEffectiveMaskExpr( maskId, activeExpr )
+// Build the "effective mask" sub-expression by combining ANY of the
+// three contributors via max(): the committed raster mask, the
+// pending raster brush mass, and the active shape's inline expression.
+// Returns null if none contribute.
+function buildEffectiveMaskExpr( maskId, pendingId, activeExpr )
 {
-   if ( maskId == null && activeExpr == null ) return null;
-   if ( maskId == null ) return activeExpr;
-   if ( activeExpr == null ) return maskId;
-   return "max(" + maskId + "," + activeExpr + ")";
+   var parts = [];
+   if ( maskId    != null ) parts.push( maskId );
+   if ( pendingId != null ) parts.push( pendingId );
+   if ( activeExpr != null ) parts.push( activeExpr );
+   if ( parts.length === 0 ) return null;
+   if ( parts.length === 1 ) return parts[0];
+   return "max(" + parts.join( "," ) + ")";
 }
 
 // 5. Combine:  destView = min(1, starless + starsProcessed * weight)
@@ -508,10 +521,10 @@ function buildEffectiveMaskExpr( maskId, activeExpr )
 //                 = (1 - mask * strength)   (normal mask: hide stars where painted)
 //                 = (1 - (1 - mask) * strength)  (inverted mask: keep stars only
 //                                                  where painted)
-function applyCombineWithMask( starlessId, starsProcId, maskId, activeExpr,
-                               strength, invert, destView )
+function applyCombineWithMask( starlessId, starsProcId, maskId, pendingId,
+                               activeExpr, strength, invert, destView )
 {
-   var effective = buildEffectiveMaskExpr( maskId, activeExpr );
+   var effective = buildEffectiveMaskExpr( maskId, pendingId, activeExpr );
 
    var pm = new PixelMath;
    if ( effective == null || strength <= 0 )
@@ -593,6 +606,132 @@ function clearMask()
    data.maskOverlayBitmap = null;
 }
 
+// Ensure the PENDING mask window exists at the preview cache size.
+// Created blank. Returns null if no starless yet.
+function ensureMaskPendingWindow()
+{
+   if ( data.starlessSmall == null ) return null;
+   var sl = data.starlessSmall.mainView.image;
+   var w  = ImageWindow.windowById( ID_MASK_PENDING );
+   if ( !w.isNull )
+   {
+      var im = w.mainView.image;
+      if ( im.width === sl.width && im.height === sl.height )
+         return w;
+      w.forceClose();
+   }
+   w = new ImageWindow( sl.width, sl.height, 1, 32, true, false,
+                        ID_MASK_PENDING );
+   refreshViewCombos();
+   var pm = new PixelMath;
+   pm.expression          = "0";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.executeOn( w.mainView, false );
+   return w;
+}
+
+// Clear PENDING and its cached overlay bitmap.
+function clearMaskPending()
+{
+   var w = ImageWindow.windowById( ID_MASK_PENDING );
+   if ( !w.isNull )
+   {
+      var pm = new PixelMath;
+      pm.expression          = "0";
+      pm.useSingleExpression = true;
+      pm.createNewImage      = false;
+      pm.generateOutput      = true;
+      pm.executeOn( w.mainView, false );
+   }
+   data.maskPendingOverlayBitmap = null;
+}
+
+// True if the PENDING mask has content (matching the cache size).
+function pendingMaskIsActive()
+{
+   var pw = ImageWindow.windowById( ID_MASK_PENDING );
+   if ( pw.isNull ) return false;
+   if ( data.starlessSmall == null ) return false;
+   var pi = pw.mainView.image;
+   var si = data.starlessSmall.mainView.image;
+   return pi.width === si.width && pi.height === si.height;
+}
+
+// Merge PENDING into MASK using max() then zero PENDING.
+function mergePendingIntoMask()
+{
+   var pw = ImageWindow.windowById( ID_MASK_PENDING );
+   if ( pw.isNull ) return;
+   var mw = ensureMaskWindow();
+   if ( mw == null ) return;
+   var pm = new PixelMath;
+   pm.expression          = "max($T," + ID_MASK_PENDING + ")";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( mw.mainView, false );
+   clearMaskPending();
+}
+
+// Build the pink/cyan overlay bitmap for PENDING mask. Uses the same
+// trick as rebuildMaskOverlay but the tint color comes from the
+// current accent (cyan in Invert mode, pink otherwise).
+function rebuildPendingOverlay()
+{
+   closeWindowById( ID_OVERLAY_PEND );
+   var pw = ImageWindow.windowById( ID_MASK_PENDING );
+   if ( pw.isNull )
+   {
+      data.maskPendingOverlayBitmap = null;
+      return;
+   }
+   try
+   {
+      // Pink = (255, 102, 170), Cyan = (102, 204, 255).
+      var rExpr, gExpr, bExpr;
+      if ( data.maskInvert )
+      {
+         rExpr = "0.4*" + ID_MASK_PENDING;
+         gExpr = "0.8*" + ID_MASK_PENDING;
+         bExpr = ID_MASK_PENDING;
+      }
+      else
+      {
+         rExpr = ID_MASK_PENDING;
+         gExpr = "0.4*" + ID_MASK_PENDING;
+         bExpr = "0.65*" + ID_MASK_PENDING;
+      }
+      var pm = new PixelMath;
+      pm.useSingleExpression  = false;
+      pm.expression0          = rExpr;
+      pm.expression1          = gExpr;
+      pm.expression2          = bExpr;
+      pm.createNewImage       = true;
+      pm.newImageId           = ID_OVERLAY_PEND;
+      pm.newImageColorSpace   = 1;
+      pm.newImageSampleFormat = 3;
+      pm.showNewImage         = false;
+      pm.executeOn( pw.mainView, false );
+      refreshViewCombos();
+      var ow = ImageWindow.windowById( ID_OVERLAY_PEND );
+      if ( !ow.isNull )
+      {
+         data.maskPendingOverlayBitmap = ow.mainView.image.render();
+         ow.forceClose();
+      }
+   }
+   catch ( e )
+   {
+      console.warningln( "* pending overlay: " + e.message );
+      data.maskPendingOverlayBitmap = null;
+   }
+}
+
 // If the cache was resampled to a different size, resample the mask
 // too so existing painted areas keep their visual location.
 function resampleMaskTo( newWidth, newHeight )
@@ -610,23 +749,53 @@ function resampleMaskTo( newWidth, newHeight )
    R.executeOn( w.mainView, false );
 }
 
-// Paint a feathered ellipse into the mask at IMAGE coordinates.
-// (cx, cy): center in pixels.  rx, ry: radii in pixels.
-// feather: gradient transition width in pixels (outside the rim).
-function paintEllipseToMask( cx, cy, rx, ry, feather )
+// Build the feathered-ellipse mask expression with a configurable
+// "gradient center" (gc, 0..1). gc = 1.0 reproduces the previous
+// behavior (solid mask=1 until the boundary, falloff outside over
+// `feather` pixels). gc = 0 makes the gradient start from the center.
+// Returns a PixelMath sub-expression evaluating to 0..1 per pixel.
+function ellipseValueExpr( cx, cy, rx, ry, feather, angleRad, gc )
 {
-   var w = ensureMaskWindow();
-   if ( w == null ) return;
    rx = Math.max( 0.5, rx );
    ry = Math.max( 0.5, ry );
    var f = Math.max( 0.5, feather );
    var fnorm = f / Math.min( rx, ry );
+   gc = Math.max( 0, Math.min( 1, gc ) );
 
-   var axTerm = "((x()-(" + cx.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
-   var ayTerm = "((y()-(" + cy.toFixed( 2 ) + "))/" + ry.toFixed( 4 ) + ")";
-   var dist   = "sqrt(" + axTerm + "*" + axTerm + "+" + ayTerm + "*" + ayTerm + ")";
-   var value  = "max(0,min(1,1-(" + dist + "-1)/" + fnorm.toFixed( 4 ) + "))";
+   var lxExpr, lyExpr;
+   if ( angleRad && Math.abs( angleRad ) > 1e-6 )
+   {
+      var co = Math.cos( angleRad ).toFixed( 6 );
+      var si = Math.sin( angleRad ).toFixed( 6 );
+      lxExpr = "((x()-(" + cx.toFixed(2) + "))*" + co +
+               "+(y()-(" + cy.toFixed(2) + "))*" + si + ")";
+      lyExpr = "(-(x()-(" + cx.toFixed(2) + "))*" + si +
+                "+(y()-(" + cy.toFixed(2) + "))*" + co + ")";
+   }
+   else
+   {
+      lxExpr = "(x()-" + cx.toFixed(2) + ")";
+      lyExpr = "(y()-" + cy.toFixed(2) + ")";
+   }
+   var ax = "(" + lxExpr + "/" + rx.toFixed( 4 ) + ")";
+   var ay = "(" + lyExpr + "/" + ry.toFixed( 4 ) + ")";
+   var dist  = "sqrt(" + ax + "*" + ax + "+" + ay + "*" + ay + ")";
+   var rangeEnd = 1 + fnorm;
+   var denom    = (rangeEnd - gc).toFixed( 6 );
+   if ( rangeEnd - gc < 1e-6 )
+   {
+      // Avoid divide-by-zero with a hard step: 1 inside, 0 outside.
+      return "iif(" + dist + "<=" + gc.toFixed(6) + ",1,0)";
+   }
+   return "max(0,min(1,1-(" + dist + "-" + gc.toFixed(6) + ")/" + denom + "))";
+}
 
+// Paint a feathered ellipse / circle into a SPECIFIC target window
+// using max() blend. Target = MASK or MASK_PENDING window.
+function paintEllipseToWindow( targetWindow, cx, cy, rx, ry, feather, gc )
+{
+   if ( targetWindow == null || targetWindow.isNull ) return;
+   var value = ellipseValueExpr( cx, cy, rx, ry, feather, 0, gc );
    var pm = new PixelMath;
    pm.expression          = "max($T," + value + ")";
    pm.useSingleExpression = true;
@@ -638,7 +807,14 @@ function paintEllipseToMask( cx, cy, rx, ry, feather )
    pm.truncate            = true;
    pm.truncateLower       = 0.0;
    pm.truncateUpper       = 1.0;
-   pm.executeOn( w.mainView, false );
+   pm.executeOn( targetWindow.mainView, false );
+}
+
+// Back-compat wrapper: paints into the persistent (committed) MASK.
+function paintEllipseToMask( cx, cy, rx, ry, feather )
+{
+   paintEllipseToWindow( ensureMaskWindow(), cx, cy, rx, ry, feather,
+                         data.maskGradientCtr );
 }
 
 // Paint a feathered axis-aligned rectangle into the mask.
@@ -671,43 +847,48 @@ function paintRectToMask( x1, y1, x2, y2, feather )
    pm.executeOn( w.mainView, false );
 }
 
-// Paint a feathered circle (brush stroke) into the mask. Equivalent
-// to paintEllipseToMask with rx = ry.
-function paintCircleToMask( cx, cy, radius, feather )
+// Paint a feathered circle (brush stroke) into the PENDING mask
+// (not the committed one). The user can then accept the strokes via
+// "Apply Edits" or undo them by clearing pending.
+function paintCircleToPending( cx, cy, radius, feather )
 {
-   paintEllipseToMask( cx, cy, radius, radius, feather );
+   var w = ensureMaskPendingWindow();
+   if ( w == null ) return;
+   paintEllipseToWindow( w, cx, cy, radius, radius, feather,
+                         data.maskGradientCtr );
 }
 
-// Erase a feathered circle from the mask: subtract the brush profile
-// from the current mask values, clamped to 0. The mask window MUST
-// already exist (eraser doesn't create one because there's nothing
-// to erase from a blank mask).
-function eraseCircleFromMask( cx, cy, radius, feather )
+// Erase a feathered circle from BOTH the committed mask and the
+// pending mask. Erasing both means the eraser is effective regardless
+// of whether the user has already committed earlier strokes or not.
+function eraseCircleFromMasks( cx, cy, radius, feather )
 {
-   var w = ImageWindow.windowById( ID_MASK );
-   if ( w.isNull ) return;     // nothing to erase
-   var rx = Math.max( 0.5, radius );
-   var ry = rx;
-   var f  = Math.max( 0.5, feather );
-   var fnorm = (f / rx).toFixed( 4 );
+   var r = Math.max( 0.5, radius );
+   var value = ellipseValueExpr( cx, cy, r, r, feather, 0,
+                                 data.maskGradientCtr );
+   var expr = "max(0,$T-" + value + ")";
 
-   var axTerm = "((x()-(" + cx.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
-   var ayTerm = "((y()-(" + cy.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
-   var dist   = "sqrt(" + axTerm + "*" + axTerm + "+" + ayTerm + "*" + ayTerm + ")";
-   var value  = "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
-
-   var pm = new PixelMath;
-   pm.expression          = "max(0,$T-" + value + ")";
-   pm.useSingleExpression = true;
-   pm.createNewImage      = false;
-   pm.generateOutput      = true;
-   pm.singleThreaded      = false;
-   pm.optimization        = true;
-   pm.rescale             = false;
-   pm.truncate            = true;
-   pm.truncateLower       = 0.0;
-   pm.truncateUpper       = 1.0;
-   pm.executeOn( w.mainView, false );
+   var targets = [
+      ImageWindow.windowById( ID_MASK ),
+      ImageWindow.windowById( ID_MASK_PENDING )
+   ];
+   for ( var i = 0; i < targets.length; ++i )
+   {
+      var w = targets[i];
+      if ( w == null || w.isNull ) continue;
+      var pm = new PixelMath;
+      pm.expression          = expr;
+      pm.useSingleExpression = true;
+      pm.createNewImage      = false;
+      pm.generateOutput      = true;
+      pm.singleThreaded      = false;
+      pm.optimization        = true;
+      pm.rescale             = false;
+      pm.truncate            = true;
+      pm.truncateLower       = 0.0;
+      pm.truncateUpper       = 1.0;
+      pm.executeOn( w.mainView, false );
+   }
 }
 
 // Rebuild the cached visualization bitmap of the mask. Uses PixelMath
@@ -795,32 +976,24 @@ function activeShapeMaskExpr()
    if ( data.activeShape == null ) return null;
    if ( data.starlessSmall == null ) return null;
 
-   var s = data.activeShape;
-   var rx = Math.max( 0.5, s.rx );
-   var ry = Math.max( 0.5, s.ry );
-   var f  = Math.max( 0.5, s.feather );
-   var cx = s.cx.toFixed( 2 );
-   var cy = s.cy.toFixed( 2 );
-
-   // Rotated coordinates in shape's local frame:
-   //   lx =  (x-cx)*cos(a) + (y-cy)*sin(a)
-   //   ly = -(x-cx)*sin(a) + (y-cy)*cos(a)
-   var co = Math.cos( s.angle ).toFixed( 6 );
-   var si = Math.sin( s.angle ).toFixed( 6 );
-   var lxExpr = "((x()-" + cx + ")*" + co + "+(y()-" + cy + ")*" + si + ")";
-   var lyExpr = "(-(x()-" + cx + ")*" + si + "+(y()-" + cy + ")*" + co + ")";
+   var s  = data.activeShape;
+   var gc = (s.gradientCenter != null) ? s.gradientCenter
+                                       : data.maskGradientCtr;
 
    if ( s.type === "ellipse" )
+      return ellipseValueExpr( s.cx, s.cy, s.rx, s.ry, s.feather, s.angle, gc );
+
+   if ( s.type === "rect" )
    {
-      var fnorm = (f / Math.min( rx, ry )).toFixed( 4 );
-      var ax = "(" + lxExpr + "/" + rx.toFixed( 4 ) + ")";
-      var ay = "(" + lyExpr + "/" + ry.toFixed( 4 ) + ")";
-      var dist = "sqrt(" + ax + "*" + ax + "+" + ay + "*" + ay + ")";
-      return "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
-   }
-   else if ( s.type === "rect" )
-   {
-      // Distance from the rectangle's edge in local coords.
+      var f = Math.max( 0.5, s.feather );
+      var rx = Math.max( 0.5, s.rx );
+      var ry = Math.max( 0.5, s.ry );
+      var co = Math.cos( s.angle ).toFixed( 6 );
+      var si = Math.sin( s.angle ).toFixed( 6 );
+      var lxExpr = "((x()-" + s.cx.toFixed(2) + ")*" + co +
+                   "+(y()-" + s.cy.toFixed(2) + ")*" + si + ")";
+      var lyExpr = "(-(x()-" + s.cx.toFixed(2) + ")*" + si +
+                    "+(y()-" + s.cy.toFixed(2) + ")*" + co + ")";
       var dx = "max(0,abs(" + lxExpr + ")-" + rx.toFixed( 2 ) + ")";
       var dy = "max(0,abs(" + lyExpr + ")-" + ry.toFixed( 2 ) + ")";
       var dist = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
@@ -830,43 +1003,14 @@ function activeShapeMaskExpr()
 }
 
 // Bake the active shape into the persistent raster mask and clear it.
-// Called from "Commit Shape" button and when the user switches tools.
+// Called from "Apply Edits" button and when the user switches tools.
 function commitActiveShape()
 {
    if ( data.activeShape == null ) return;
-   var s = data.activeShape;
-   data.activeShape = null;       // clear FIRST so the painter doesn't pick it up
+   var value = activeShapeMaskExpr();
+   data.activeShape = null;       // clear FIRST so it isn't included twice
    var w = ensureMaskWindow();
-   if ( w == null ) return;
-
-   // Use the same expression we used inline, but apply it to the mask
-   // window with a max() blend so it accumulates with existing content.
-   var rx = Math.max( 0.5, s.rx );
-   var ry = Math.max( 0.5, s.ry );
-   var f  = Math.max( 0.5, s.feather );
-   var cx = s.cx.toFixed( 2 );
-   var cy = s.cy.toFixed( 2 );
-   var co = Math.cos( s.angle ).toFixed( 6 );
-   var si = Math.sin( s.angle ).toFixed( 6 );
-   var lxExpr = "((x()-" + cx + ")*" + co + "+(y()-" + cy + ")*" + si + ")";
-   var lyExpr = "(-(x()-" + cx + ")*" + si + "+(y()-" + cy + ")*" + co + ")";
-
-   var value;
-   if ( s.type === "ellipse" )
-   {
-      var fnorm = (f / Math.min( rx, ry )).toFixed( 4 );
-      var ax = "(" + lxExpr + "/" + rx.toFixed( 4 ) + ")";
-      var ay = "(" + lyExpr + "/" + ry.toFixed( 4 ) + ")";
-      var dist = "sqrt(" + ax + "*" + ax + "+" + ay + "*" + ay + ")";
-      value = "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
-   }
-   else
-   {
-      var dx = "max(0,abs(" + lxExpr + ")-" + rx.toFixed( 2 ) + ")";
-      var dy = "max(0,abs(" + lyExpr + ")-" + ry.toFixed( 2 ) + ")";
-      var dist2 = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
-      value = "max(0,min(1,1-" + dist2 + "/" + f.toFixed( 4 ) + "))";
-   }
+   if ( w == null || value == null ) return;
 
    var pm = new PixelMath;
    pm.expression          = "max($T," + value + ")";
@@ -877,6 +1021,23 @@ function commitActiveShape()
    pm.truncateLower       = 0.0;
    pm.truncateUpper       = 1.0;
    pm.executeOn( w.mainView, false );
+}
+
+// Commit ALL pending edits (active shape + pending raster brush
+// strokes) into the persistent mask, then clear both. Single button
+// for the user since both are "edits in progress".
+function commitAllPending()
+{
+   commitActiveShape();
+   mergePendingIntoMask();
+   rebuildMaskOverlay();
+   data.maskPendingOverlayBitmap = null;
+}
+
+// True if there is anything pending to commit.
+function hasPendingEdits()
+{
+   return data.activeShape != null || pendingMaskIsActive();
 }
 
 // Compute handle positions for the active shape in IMAGE coordinates.
@@ -953,19 +1114,19 @@ function maskAccentSolid()
    return data.maskInvert ? 0xff66ccff : 0xffff66aa;
 }
 
-// Update the Commit button text + enabled state to reflect whether
-// there is an editable active shape ready to bake.
+// Update the Apply Edits button text + enabled state to reflect
+// whether there are any pending edits (active shape OR brush strokes).
 function updateCommitButton()
 {
    if ( ui == null || ui.maskCommitBtn == null ) return;
-   if ( data.activeShape != null )
+   if ( hasPendingEdits() )
    {
-      ui.maskCommitBtn.text    = "Commit Shape";
+      ui.maskCommitBtn.text    = "Apply Edits";
       ui.maskCommitBtn.enabled = true;
    }
    else
    {
-      ui.maskCommitBtn.text    = "(no shape)";
+      ui.maskCommitBtn.text    = "(no edits)";
       ui.maskCommitBtn.enabled = false;
    }
 }
@@ -979,10 +1140,17 @@ function updateMaskRowsVisibility()
    if ( ui == null ) return;
    var paramVisible = (data.maskTool !== "pan");
    var radiusVisible = (data.maskTool === "brush" || data.maskTool === "eraser");
+   // Gradient Center is meaningful for ellipse and brush/eraser, NOT
+   // for rectangle (which has no radial geometry).
+   var gradientVisible = (data.maskTool === "ellipse"
+                       || data.maskTool === "brush"
+                       || data.maskTool === "eraser");
    if ( ui.maskStrengthNC )
       paramVisible ? ui.maskStrengthNC.show() : ui.maskStrengthNC.hide();
    if ( ui.maskFeatherNC )
       paramVisible ? ui.maskFeatherNC.show() : ui.maskFeatherNC.hide();
+   if ( ui.gradientCtrNC )
+      gradientVisible ? ui.gradientCtrNC.show() : ui.gradientCtrNC.hide();
    if ( ui.brushRadiusNC )
       radiusVisible ? ui.brushRadiusNC.show() : ui.brushRadiusNC.hide();
 }
@@ -1000,10 +1168,13 @@ function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
          applySCNR( procView );
    }
    var maskId    = (maskIsActive() && data.maskStrength > 0) ? ID_MASK : null;
+   var pendingId = (pendingMaskIsActive() && data.maskStrength > 0)
+                   ? ID_MASK_PENDING : null;
    var activeExp = (data.activeShape != null && data.maskStrength > 0)
                  ? activeShapeMaskExpr() : null;
-   applyCombineWithMask( starlessId, procView.id, maskId, activeExp,
-                         data.maskStrength, data.maskInvert, targetView );
+   applyCombineWithMask( starlessId, procView.id, maskId, pendingId,
+                         activeExp, data.maskStrength, data.maskInvert,
+                         targetView );
 }
 
 // ===================== Live preview =====================
@@ -1035,8 +1206,9 @@ function updatePreview()
          // expression broadcast to a multi-channel target gives R=G=B
          // (i.e. B/W).
          var maskId    = maskIsActive() ? ID_MASK : null;
+         var pendingId = pendingMaskIsActive() ? ID_MASK_PENDING : null;
          var activeExp = (data.activeShape != null) ? activeShapeMaskExpr() : null;
-         var eff       = buildEffectiveMaskExpr( maskId, activeExp );
+         var eff       = buildEffectiveMaskExpr( maskId, pendingId, activeExp );
          var pmMask = new PixelMath;
          pmMask.expression          = (eff != null) ? eff : "0";
          pmMask.useSingleExpression = true;
@@ -1136,6 +1308,14 @@ function applyFinal()
       var maskExpr       = "";
       if ( data.maskStrength > 0 )
       {
+         // Merge PENDING into MASK at the preview scale FIRST, so the
+         // full-res resample picks up everything in one shot.
+         if ( pendingMaskIsActive() )
+         {
+            mergePendingIntoMask();
+            data.maskPendingOverlayBitmap = null;
+         }
+
          var maskFullId = null;
          if ( maskIsActive() )
          {
@@ -1150,8 +1330,6 @@ function applyFinal()
             var prevW = data.starlessSmall.mainView.image.width;
             var scl   = sl.width / prevW;
             var s = data.activeShape;
-            // Temporarily upscale the active shape parameters and build
-            // the expression; then restore the original shape.
             var orig = { cx:s.cx, cy:s.cy, rx:s.rx, ry:s.ry, feather:s.feather };
             s.cx      *= scl;
             s.cy      *= scl;
@@ -1168,7 +1346,7 @@ function applyFinal()
             }
          }
 
-         var effective = buildEffectiveMaskExpr( maskFullId, activeFullExpr );
+         var effective = buildEffectiveMaskExpr( maskFullId, null, activeFullExpr );
          if ( effective != null )
          {
             var str = data.maskStrength.toFixed( 4 );
@@ -1267,14 +1445,17 @@ function cleanup()
    closeWindowById( ID_PV_SMALL );
    closeWindowById( ID_TMP_FULL );
    closeWindowById( ID_MASK );
+   closeWindowById( ID_MASK_PENDING );
    closeWindowById( ID_MASK_FULL );
    closeWindowById( ID_OVERLAY );
+   closeWindowById( ID_OVERLAY_PEND );
    data.starlessSmall     = null;
    data.starsSmall        = null;
    data.starsProc         = null;
    data.previewSmall      = null;
-   data.maskOverlayBitmap = null;
-   data.activeShape       = null;
+   data.maskOverlayBitmap        = null;
+   data.maskPendingOverlayBitmap = null;
+   data.activeShape              = null;
 }
 
 // ===================== Debounce =====================
@@ -1410,18 +1591,22 @@ function PreviewFrame( parent )
             return;     // exit onPaint with just the bare preview drawn
          }
 
-         // Mask overlay (red-tinted, additive blend so black areas
-         // remain transparent against the preview). Drawn only in
-         // "blend" mode. Skipped in "mask" (the preview already IS the mask).
-         if ( data.maskOverlayBitmap != null && data.viewMode === "blend" )
+         // Mask overlay (red = committed, pink/cyan = pending).
+         // Additive blend so black pixels in the overlay are invisible.
+         if ( data.viewMode === "blend" )
          {
-            try
+            try { g.compositionOperator = 12; } catch ( ce ) {}
+            if ( data.maskOverlayBitmap != null )
             {
-               g.compositionOperator = 12;   // CompositionOp_Plus
-               g.drawScaledBitmap( destRect, data.maskOverlayBitmap );
-               g.compositionOperator = 0;
+               try { g.drawScaledBitmap( destRect, data.maskOverlayBitmap ); }
+               catch ( ce ) {}
             }
-            catch ( ce ) { /* fall through quietly */ }
+            if ( data.maskPendingOverlayBitmap != null )
+            {
+               try { g.drawScaledBitmap( destRect, data.maskPendingOverlayBitmap ); }
+               catch ( ce ) {}
+            }
+            try { g.compositionOperator = 0; } catch ( ce ) {}
          }
 
          // Active shape (editable): outline + handles. Drawn on top of
@@ -1478,11 +1663,45 @@ function PreviewFrame( parent )
                   handles[h].x, handles[h].y );
                if ( handles[h].mode === "rotate" )
                {
-                  // Filled green circle for rotation.
+                  // Larger green circle for the rotation handle, with
+                  // an inscribed curved-arrow icon so it's visually
+                  // distinct from the resize handles.
                   g.pen   = new Pen( 0xff66ff66, 1.5 );
-                  g.brush = new Brush( 0xff336633 );
-                  g.drawEllipse( new Rect( hc.x0 - 6, hc.y0 - 6,
-                                           hc.x0 + 6, hc.y0 + 6 ) );
+                  g.brush = new Brush( 0xff224422 );
+                  g.drawEllipse( new Rect( hc.x0 - 9, hc.y0 - 9,
+                                           hc.x0 + 9, hc.y0 + 9 ) );
+                  // Curved arrow inside (small "C" with arrowhead).
+                  g.pen   = new Pen( 0xffffffff, 1.4 );
+                  g.brush = new Brush( 0x00000000 );
+                  var arcR = 4.5;
+                  var arcN = 14;
+                  var arcStart = -Math.PI / 2;          // start at top
+                  var arcSweep = 1.5 * Math.PI;          // 270 degrees
+                  var lastX = hc.x0 + arcR * Math.cos( arcStart );
+                  var lastY = hc.y0 + arcR * Math.sin( arcStart );
+                  for ( var aIdx = 1; aIdx <= arcN; ++aIdx )
+                  {
+                     var aFrac = aIdx / arcN;
+                     var ang   = arcStart + arcSweep * aFrac;
+                     var nx = hc.x0 + arcR * Math.cos( ang );
+                     var ny = hc.y0 + arcR * Math.sin( ang );
+                     g.drawLine( lastX, lastY, nx, ny );
+                     lastX = nx; lastY = ny;
+                  }
+                  // Arrowhead at the end of the arc.
+                  var endAng = arcStart + arcSweep;
+                  var tipX = hc.x0 + arcR * Math.cos( endAng );
+                  var tipY = hc.y0 + arcR * Math.sin( endAng );
+                  // Tangent direction at the tip (rotated 90 from radial).
+                  var tdx = -Math.sin( endAng );
+                  var tdy =  Math.cos( endAng );
+                  // Two short lines forming the arrowhead.
+                  g.drawLine( tipX, tipY,
+                              tipX - 3 * tdx + 2 * Math.cos( endAng ),
+                              tipY - 3 * tdy + 2 * Math.sin( endAng ) );
+                  g.drawLine( tipX, tipY,
+                              tipX - 3 * tdx - 2 * Math.cos( endAng ),
+                              tipY - 3 * tdy - 2 * Math.sin( endAng ) );
                   // Stem connecting to the top center of the shape.
                   var localTopX = 0, localTopY = -s.ry;
                   var topWx = s.cx + localTopX * co - localTopY * si;
@@ -1684,17 +1903,19 @@ function PreviewFrame( parent )
          var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
          var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
          if ( data.maskTool === "brush" )
-            paintCircleToMask( p0.x, p0.y, radPx, feathr );
+            paintCircleToPending( p0.x, p0.y, radPx, feathr );
          else
-            eraseCircleFromMask( p0.x, p0.y, radPx, feathr );
+            eraseCircleFromMasks( p0.x, p0.y, radPx, feathr );
          self._brushTrail = [ { x: p0.x, y: p0.y, r: radPx } ];
          scheduleUpdate();
          self.repaint();
          return;
       }
 
-      // Ellipse / Rectangle: either grab a handle on the active shape
-      // or start drawing a new active shape (replacing any previous).
+      // Ellipse / Rectangle: either grab a handle on the active shape,
+      // or start drawing a new one. But if there's ALREADY an active
+      // shape and the user clicks outside it, do NOTHING (don't
+      // silently destroy their in-progress shape).
       var p = self._canvasToImage( x, y );
       if ( p == null ) return;
 
@@ -1715,16 +1936,25 @@ function PreviewFrame( parent )
          return;
       }
 
-      // No hit -> start a brand-new active shape.
+      if ( data.activeShape != null )
+      {
+         // Click missed the existing shape - keep it. To start a new
+         // one the user must commit it (Apply Edits) or discard it
+         // (ESC) first.
+         return;
+      }
+
+      // No active shape -> create one.
       var feathr2 = pctToPx( data.maskFeatherPct, self.bitmap.width );
       data.activeShape = {
-         type:    data.maskTool,    // "ellipse" or "rect"
-         cx:      p.x,
-         cy:      p.y,
-         rx:      0.5,
-         ry:      0.5,
-         angle:   0,
-         feather: feathr2
+         type:           data.maskTool,    // "ellipse" or "rect"
+         cx:             p.x,
+         cy:             p.y,
+         rx:             0.5,
+         ry:             0.5,
+         angle:          0,
+         feather:        feathr2,
+         gradientCenter: data.maskGradientCtr
       };
       self._dragMode    = "draw";
       self._drawStart   = p;
@@ -1755,9 +1985,9 @@ function PreviewFrame( parent )
             var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
             var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
             if ( data.maskTool === "brush" )
-               paintCircleToMask( p.x, p.y, radPx, feathr );
+               paintCircleToPending( p.x, p.y, radPx, feathr );
             else
-               eraseCircleFromMask( p.x, p.y, radPx, feathr );
+               eraseCircleFromMasks( p.x, p.y, radPx, feathr );
             // Append to the real-time trail for instant visual feedback.
             self._brushTrail.push( { x: p.x, y: p.y, r: radPx } );
             scheduleUpdate();
@@ -1870,9 +2100,10 @@ function PreviewFrame( parent )
       }
       if ( data.maskTool === "brush" || data.maskTool === "eraser" )
       {
-         // Rebuild the actual overlay bitmap once on release, then
-         // clear the real-time trail.
+         // Rebuild both overlays once on release, then clear the
+         // real-time trail. Pending = pink/cyan, Mask = red.
          rebuildMaskOverlay();
+         rebuildPendingOverlay();
          self._brushTrail = [];
       }
       // If the user just clicked (no real drag) on an empty area with
@@ -1885,6 +2116,8 @@ function PreviewFrame( parent )
       }
       self._dragMode     = null;
       self._dragShapeBak = null;
+      // Refresh commit-button state: a brush stroke may have made
+      // the pending mask non-empty, enabling Apply Edits.
       updateCommitButton();
       scheduleUpdate();
       self.repaint();
@@ -2236,17 +2469,16 @@ function CombinerDialog()
    };
 
    this.maskCommitBtn = new PushButton( this );
-   this.maskCommitBtn.text    = "Commit Shape";
+   this.maskCommitBtn.text    = "Apply Edits";
    this.maskCommitBtn.enabled = false;
    this.maskCommitBtn.toolTip =
-      "Bake the current editable ellipse / rectangle into the mask " +
-      "and clear it. After commit you can draw a new shape on top. " +
-      "Shortcut: ENTER.";
+      "Bake the current editable shape AND all pending brush strokes " +
+      "into the persistent mask, then clear them. Pending edits show " +
+      "in pink/cyan; committed mask shows in red. Shortcut: ENTER.";
    this.maskCommitBtn.onClick = function()
    {
-      if ( data.activeShape == null ) return;
-      commitActiveShape();
-      rebuildMaskOverlay();
+      if ( !hasPendingEdits() ) return;
+      commitAllPending();
       updateCommitButton();
       if ( self.previewFrame ) self.previewFrame.repaint();
       scheduleUpdate();
@@ -2302,6 +2534,7 @@ function CombinerDialog()
    {
       discardActiveShape();
       clearMask();
+      clearMaskPending();
       updateCommitButton();
       if ( self.previewFrame )
          self.previewFrame.repaint();
@@ -2398,6 +2631,36 @@ function CombinerDialog()
          self.previewFrame.repaint();
    };
 
+   // Gradient Center slider: where inside the shape the falloff starts.
+   // 100% = solid until boundary (current default; sharpest center).
+   //   0% = gradient from center to outside (no solid zone).
+   this.gradientCtrNC = new NumericControl( this );
+   this.gradientCtrNC.label.text          = "Gradient Center:";
+   this.gradientCtrNC.label.setFixedWidth( labelWidth );
+   this.gradientCtrNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   this.gradientCtrNC.setRange( 0.0, 1.0 );
+   this.gradientCtrNC.slider.setRange( 0, 1000 );
+   this.gradientCtrNC.slider.scaledMinWidth = 360;
+   this.gradientCtrNC.setPrecision( 2 );
+   this.gradientCtrNC.setValue( data.maskGradientCtr );
+   this.gradientCtrNC.edit.minWidth = 70;
+   this.gradientCtrNC.toolTip =
+      "Where inside the shape the gradient starts, as a fraction of the " +
+      "shape's radius.\n" +
+      "1.0 = solid mask=1 until the boundary, then falloff outside " +
+      "over Feather pixels (default).\n" +
+      "0.0 = gradient from the center, no solid zone.\n" +
+      "0.5 = solid until half radius, gradient from there outward.\n" +
+      "Verify the result by switching the Preview View to 'Mask only (B/W)'.";
+   this.gradientCtrNC.onValueUpdated = function( v )
+   {
+      data.maskGradientCtr = v;
+      // Live-update the active shape so the change is visible.
+      if ( data.activeShape != null )
+         data.activeShape.gradientCenter = v;
+      scheduleUpdate();
+   };
+
    // ---- Embedded preview ----
    this.previewFrame = new PreviewFrame( this );
 
@@ -2474,6 +2737,7 @@ function CombinerDialog()
    this.sizer.add( viewModeRow );
    this.sizer.add( this.maskStrengthNC );
    this.sizer.add( this.maskFeatherNC );
+   this.sizer.add( this.gradientCtrNC );
    this.sizer.add( this.brushRadiusNC );
    this.sizer.add( this.previewFrame, 100 );
    this.sizer.add( btmRow );
@@ -2499,10 +2763,9 @@ function CombinerDialog()
       }
       else if ( keyCode === Key_Return || keyCode === Key_Enter )
       {
-         if ( data.activeShape != null )
+         if ( hasPendingEdits() )
          {
-            commitActiveShape();
-            rebuildMaskOverlay();
+            commitAllPending();
             updateCommitButton();
             if ( self.previewFrame ) self.previewFrame.repaint();
             scheduleUpdate();
@@ -2513,6 +2776,7 @@ function CombinerDialog()
       {
          discardActiveShape();
          clearMask();
+         clearMaskPending();
          updateCommitButton();
          if ( self.previewFrame ) self.previewFrame.repaint();
          scheduleUpdate();

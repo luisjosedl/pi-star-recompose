@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.16"
+#define VERSION       "1.1.17"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -147,11 +147,13 @@ function CombinerData()
    this.maskPendingOverlayBitmap = null;
    this.maskOverlayBitmap = null;     // cached visualization bitmap
    // View mode for the preview area:
-   //   "preview" : recombined image only (clean, no red overlay)
-   //   "blend"   : recombined image + red mask overlay (default; lets you
-   //               see what the mask covers while editing)
-   //   "mask"    : just the mask in grayscale (black = 0, white = 1)
-   this.viewMode         = "blend";
+   //   "edit"   : recombined image + mask overlays/handles. Mask is
+   //              NOT applied to the combine, so the underlying image
+   //              stays fully visible. DEFAULT - best for editing.
+   //   "result" : same overlays, BUT the mask IS applied so the user
+   //              sees the actual masked result (what Apply produces).
+   //   "mask"   : just the mask in grayscale (black = 0, white = 1).
+   this.viewMode         = "edit";
 
    // Active editable shape (one at a time, drawn with the Ellipse or
    // Rect tool). Can be moved / resized / rotated until the user
@@ -1127,8 +1129,13 @@ function updateMaskRowsVisibility()
 }
 
 // Run the full pipeline:
-// copy stars -> arcsinh -> (sat + scnr) -> combine (with optional mask).
-function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
+// copy stars -> arcsinh -> (sat + scnr) -> combine.
+// If useMask is true, the mask (committed + pending + active shape) is
+// applied to the combine; if false, the combine is the clean
+// starless+stars sum (the editing overlay is still drawn on top by
+// the canvas paint code).
+function runPipeline( starlessId, starsSrcId, procView, targetView,
+                     isColor, useMask )
 {
    copyInto( starsSrcId, procView );
    applyArcsinh( procView, data.stretchIntensity, data.blackPoint );
@@ -1138,11 +1145,13 @@ function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
       if ( data.removeGreen )
          applySCNR( procView );
    }
-   var maskId    = (maskIsActive() && data.maskStrength > 0) ? ID_MASK : null;
-   var pendingId = (pendingMaskIsActive() && data.maskStrength > 0)
-                   ? ID_MASK_PENDING : null;
-   var activeExp = (data.activeShape != null && data.maskStrength > 0)
-                 ? activeShapeMaskExpr() : null;
+   var maskId    = null, pendingId = null, activeExp = null;
+   if ( useMask && data.maskStrength > 0 )
+   {
+      if ( maskIsActive() )         maskId    = ID_MASK;
+      if ( pendingMaskIsActive() )  pendingId = ID_MASK_PENDING;
+      if ( data.activeShape != null ) activeExp = activeShapeMaskExpr();
+   }
    applyCombineWithMask( starlessId, procView.id, maskId, pendingId,
                          activeExp, data.maskStrength, data.maskInvert,
                          targetView );
@@ -1192,17 +1201,20 @@ function updatePreview()
       }
       else
       {
-         // "preview" and "blend" both run the normal pipeline. The
-         // visual difference (overlay or not) is handled by onPaint.
+         // "edit" runs the combine WITHOUT mask (image stays visible
+         // for alignment); "result" applies the mask so the user
+         // sees the actual masked output.
          var isColor = data.starlessSmall.mainView.image.numberOfChannels > 1
                     && data.starsSmall.mainView.image.numberOfChannels   > 1;
+         var useMask = (data.viewMode === "result");
 
          runPipeline(
             ID_SL_SMALL,
             ID_ST_SMALL,
             data.starsProc.mainView,
             data.previewSmall.mainView,
-            isColor
+            isColor,
+            useMask
          );
       }
 
@@ -1554,17 +1566,11 @@ function PreviewFrame( parent )
          // Base preview
          g.drawScaledBitmap( destRect, self.bitmap );
 
-         // In "Preview only" mode, hide ALL editing UI (overlay, active
-         // shape, handles, brush ring, trail). The user sees just the
-         // recombined image, no tinting or controls.
-         if ( data.viewMode === "preview" )
-         {
-            return;     // exit onPaint with just the bare preview drawn
-         }
-
-         // Mask overlay (red = committed, pink/cyan = pending).
-         // Additive blend so black pixels in the overlay are invisible.
-         if ( data.viewMode === "blend" )
+         // Mask overlays (red = committed, pink/cyan = pending) are
+         // drawn for both "edit" and "result" view modes. "mask" mode
+         // already shows the mask as the preview itself, so we skip
+         // overlays there to avoid double-rendering.
+         if ( data.viewMode === "edit" || data.viewMode === "result" )
          {
             try { g.compositionOperator = 12; } catch ( ce ) {}
             if ( data.maskOverlayBitmap != null )
@@ -2475,28 +2481,26 @@ function CombinerDialog()
    };
 
    // 3-mode view selector for the preview canvas.
-   var viewModeLabel = new Label( this );
-   viewModeLabel.text          = "View:";
-   viewModeLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-
    this.viewModeCombo = new ComboBox( this );
    this.viewModeCombo.editEnabled = false;
-   this.viewModeCombo.addItem( "Preview only" );          // 0
-   this.viewModeCombo.addItem( "Preview + Mask blend" );  // 1
-   this.viewModeCombo.addItem( "Mask only (B/W)" );       // 2
+   this.viewModeCombo.addItem( "Edit (image stays visible)" );  // 0 = edit
+   this.viewModeCombo.addItem( "Result (mask applied)" );       // 1 = result
+   this.viewModeCombo.addItem( "Mask only (B/W)" );             // 2 = mask
    this.viewModeCombo.currentItem =
-        (data.viewMode === "preview") ? 0
-      : (data.viewMode === "mask"   ) ? 2 : 1;
+        (data.viewMode === "result") ? 1
+      : (data.viewMode === "mask"  ) ? 2 : 0;
    this.viewModeCombo.toolTip =
-      "Preview only: clean recombined image, no red overlay.\n" +
-      "Preview + Mask blend: recombined image with a red tint showing " +
-      "the mask coverage (default; useful for aligning shapes to " +
-      "features).\n" +
-      "Mask only: shows the mask itself in black and white, useful to " +
-      "verify exactly what the mask covers before clicking Apply.";
+      "Edit (default): full image with mask shown as overlay/outline. " +
+      "The mask is NOT applied to the combine so the underlying image " +
+      "stays visible - best for aligning shapes to features.\n" +
+      "Result: the mask IS applied to the combine, so you see exactly " +
+      "what the Apply button will produce.\n" +
+      "Mask only: shows the mask itself in black and white. Useful to " +
+      "verify the gradient profile and intensity.\n" +
+      "Apply always uses the mask regardless of the view mode.";
    this.viewModeCombo.onItemSelected = function( idx )
    {
-      data.viewMode = ["preview","blend","mask"][ idx ];
+      data.viewMode = ["edit","result","mask"][ idx ];
       scheduleUpdate();
       if ( self.previewFrame ) self.previewFrame.repaint();
    };

@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.17"
+#define VERSION       "1.1.18"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -820,15 +820,36 @@ function paintEllipseToWindow( targetWindow, cx, cy, rx, ry, feather, gc )
    pm.executeOn( targetWindow.mainView, false );
 }
 
+// Reentrancy guard for brush/eraser PixelMath calls. PixInsight's
+// PixelMath.executeOn() internally pumps the event loop to keep the
+// UI responsive, which can fire the next mouseMove event mid-execute.
+// That nested call then tries to lock the same view ("__AD_mask_pend")
+// while it's still locked from the outer call, producing:
+//   "The view is already locked for write operations: __AD_mask_pend"
+// The flag below short-circuits the inner call. Returns true if the
+// paint actually ran, false if it was skipped. Callers can use the
+// return value to keep their trail in sync with the actual mask.
+var __maskPainting = false;
+
 // Paint a feathered circle (brush stroke) into the PENDING mask
 // (not the committed one). The user can then accept the strokes via
 // "Apply Edits" or undo them by clearing pending.
 function paintCircleToPending( cx, cy, radius, feather )
 {
-   var w = ensureMaskPendingWindow();
-   if ( w == null ) return;
-   paintEllipseToWindow( w, cx, cy, radius, radius, feather,
-                         data.maskGradientCtr );
+   if ( __maskPainting ) return false;
+   __maskPainting = true;
+   try
+   {
+      var w = ensureMaskPendingWindow();
+      if ( w == null ) return false;
+      paintEllipseToWindow( w, cx, cy, radius, radius, feather,
+                            data.maskGradientCtr );
+      return true;
+   }
+   finally
+   {
+      __maskPainting = false;
+   }
 }
 
 // Erase a feathered circle from BOTH the committed mask and the
@@ -836,31 +857,41 @@ function paintCircleToPending( cx, cy, radius, feather )
 // of whether the user has already committed earlier strokes or not.
 function eraseCircleFromMasks( cx, cy, radius, feather )
 {
-   var r = Math.max( 0.5, radius );
-   var value = ellipseValueExpr( cx, cy, r, r, feather, 0,
-                                 data.maskGradientCtr );
-   var expr = "max(0,$T-" + value + ")";
-
-   var targets = [
-      ImageWindow.windowById( ID_MASK ),
-      ImageWindow.windowById( ID_MASK_PENDING )
-   ];
-   for ( var i = 0; i < targets.length; ++i )
+   if ( __maskPainting ) return false;
+   __maskPainting = true;
+   try
    {
-      var w = targets[i];
-      if ( w == null || w.isNull ) continue;
-      var pm = new PixelMath;
-      pm.expression          = expr;
-      pm.useSingleExpression = true;
-      pm.createNewImage      = false;
-      pm.generateOutput      = true;
-      pm.singleThreaded      = false;
-      pm.optimization        = true;
-      pm.rescale             = false;
-      pm.truncate            = true;
-      pm.truncateLower       = 0.0;
-      pm.truncateUpper       = 1.0;
-      pm.executeOn( w.mainView, false );
+      var r = Math.max( 0.5, radius );
+      var value = ellipseValueExpr( cx, cy, r, r, feather, 0,
+                                    data.maskGradientCtr );
+      var expr = "max(0,$T-" + value + ")";
+
+      var targets = [
+         ImageWindow.windowById( ID_MASK ),
+         ImageWindow.windowById( ID_MASK_PENDING )
+      ];
+      for ( var i = 0; i < targets.length; ++i )
+      {
+         var w = targets[i];
+         if ( w == null || w.isNull ) continue;
+         var pm = new PixelMath;
+         pm.expression          = expr;
+         pm.useSingleExpression = true;
+         pm.createNewImage      = false;
+         pm.generateOutput      = true;
+         pm.singleThreaded      = false;
+         pm.optimization        = true;
+         pm.rescale             = false;
+         pm.truncate            = true;
+         pm.truncateLower       = 0.0;
+         pm.truncateUpper       = 1.0;
+         pm.executeOn( w.mainView, false );
+      }
+      return true;
+   }
+   finally
+   {
+      __maskPainting = false;
    }
 }
 
@@ -1631,6 +1662,34 @@ function PreviewFrame( parent )
             g.brush = new Brush( 0x00000000 );
             g.drawPolygon( pts );
 
+            // Inner "core" contour: a thin dashed inset matching the
+            // boundary where the solid mask=1 zone ends and the
+            // gradient starts. Drawn only when the shape has a real
+            // gradient (gc < 1) so the user sees what the gradient
+            // looks like even outside the Mask-only B/W view.
+            var gcShape = (s.gradientCenter != null)
+                        ? s.gradientCenter : data.maskGradientCtr;
+            if ( s.type === "ellipse" && gcShape < 0.99
+              && gcShape * Math.min( s.rx, s.ry ) >= 1.0 )
+            {
+               var corePts = [];
+               for ( var ci = 0; ci < N; ++ci )
+               {
+                  var cth = (ci / N) * 2 * Math.PI;
+                  var clx = s.rx * gcShape * Math.cos( cth );
+                  var cly = s.ry * gcShape * Math.sin( cth );
+                  var cwx = s.cx + clx * co - cly * si;
+                  var cwy = s.cy + clx * si + cly * co;
+                  var ccp = self._imageRectToCanvas( cwx, cwy, cwx, cwy );
+                  corePts.push( new Point( ccp.x0, ccp.y0 ) );
+               }
+               var corePen = new Pen( maskAccentPen(), 1.0 );
+               try { corePen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
+               g.pen   = corePen;
+               g.brush = new Brush( 0x00000000 );
+               g.drawPolygon( corePts );
+            }
+
             // Draw the 4 corner handles + the rotation handle.
             var handles = getActiveShapeHandles();
             for ( var h = 0; h < handles.length; ++h )
@@ -1718,7 +1777,11 @@ function PreviewFrame( parent )
          }
 
          // Brush / eraser cursor ring at the current mouse position.
-         // Two rings: solid = radius, dashed = radius + feather edge.
+         // Up to three rings:
+         //   solid  = brush radius (where the stroke ends solidly)
+         //   dashed = radius + feather (where the alpha falls to 0)
+         //   dashed (innermost) = radius * gc (core of the gradient,
+         //                                     where mask=1 ends)
          var isBrushyTool = (data.maskTool === "brush" || data.maskTool === "eraser");
          if ( isBrushyTool && self._cursorImg != null )
          {
@@ -1739,6 +1802,18 @@ function PreviewFrame( parent )
                try { dashPen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
                g.pen = dashPen;
                g.drawEllipse( cOuter );
+            }
+            // Inner core ring (where solid mask=1 zone ends).
+            if ( data.maskGradientCtr < 0.99 && data.maskGradientCtr * radPx >= 1 )
+            {
+               var coreRad = radPx * data.maskGradientCtr;
+               var cCore = self._imageRectToCanvas(
+                  self._cursorImg.x - coreRad, self._cursorImg.y - coreRad,
+                  self._cursorImg.x + coreRad, self._cursorImg.y + coreRad );
+               var coreDashPen = new Pen( maskAccentPen(), 1.0 );
+               try { coreDashPen.style = 2; } catch ( pe ) {}
+               g.pen = coreDashPen;
+               g.drawEllipse( cCore );
             }
          }
       }

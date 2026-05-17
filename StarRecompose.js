@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.23"
+#define VERSION       "1.1.24"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1006,14 +1006,49 @@ function smoothMaskWindows( sigmaPct )
    }
 }
 
-// Defensive builders for Pen and Brush. Empirically (v1.1.19 .. v1.1.22),
-// the user reported that pens/brushes constructed with a color argument
-// rendered as solid black on their PixInsight build. We don't know
-// whether the constructor signature is `new Pen(color, width)` or
-// `new Pen()` + property assignment, so we set both: pass to the
-// constructor AND assign properties afterward. Also force the pen
-// style to SolidLine explicitly so the default (whatever it might be
-// in PJSR) cannot leave the pen invisible.
+// One-time console diagnostic on first paint: logs what PJSR actually
+// stored in the Pen/Brush properties for our color values. If the
+// colors keep coming out black, the console output will show whether
+// the issue is at construction time, property assignment, or render.
+var __colorDebugLogged = false;
+function logColorDebug( color )
+{
+   if ( __colorDebugLogged ) return;
+   __colorDebugLogged = true;
+   try
+   {
+      console.show();
+      console.writeln( "" );
+      console.writeln( "============ AstroDL color diagnostic ============" );
+      console.writeln( "Test color requested: 0x" + color.toString( 16 ) +
+                       " (decimal " + color + ")" );
+      var p1 = null;
+      try { p1 = new Pen( color, 2.0 ); } catch ( e ) {
+         console.writeln( "new Pen(color, 2.0) threw: " + e.message );
+      }
+      if ( p1 != null )
+         console.writeln( "Pen ctor: pen.color = 0x" + p1.color.toString(16) +
+                          ", pen.width = " + p1.width +
+                          ", pen.style = " + p1.style );
+      var p2 = new Pen();
+      try { p2.color = color; } catch ( e ) {
+         console.writeln( "pen.color = color threw: " + e.message );
+      }
+      console.writeln( "Property set: pen.color = 0x" + p2.color.toString(16) );
+      var b1 = null;
+      try { b1 = new Brush( color ); } catch ( e ) {
+         console.writeln( "new Brush(color) threw: " + e.message );
+      }
+      if ( b1 != null )
+         console.writeln( "Brush ctor: brush.color = 0x" + b1.color.toString(16) );
+      console.writeln( "==================================================" );
+   }
+   catch ( ee ) { /* ignore logging errors */ }
+}
+
+// Defensive builders for Pen and Brush. PJSR has shown inconsistent
+// behavior with the constructor's color argument; this sets the color
+// both ways (constructor + property), and forces SolidLine style.
 function makePen( color, width, style )
 {
    var pen = null;
@@ -1042,6 +1077,7 @@ function makeBrush( color )
 function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
 {
    if ( pts == null || pts.length < 2 ) return;
+   logColorDebug( mainColor );        // one-time PJSR color diagnostic
    try { g.antialiasing = true; } catch ( ae ) {}
 
    var penStyle  = dashed ? 2 : 1;
@@ -1260,21 +1296,18 @@ function updateCommitButton()
 function updateMaskRowsVisibility()
 {
    if ( ui == null ) return;
-   var paramVisible = (data.maskTool !== "pan");
-   var radiusVisible = (data.maskTool === "brush" || data.maskTool === "eraser");
-   // Gradient Center is meaningful for ellipse and brush/eraser, NOT
-   // for rectangle (which has no radial geometry).
-   var gradientVisible = (data.maskTool === "ellipse"
-                       || data.maskTool === "brush"
-                       || data.maskTool === "eraser");
+   var paramVisible    = (data.maskTool !== "pan");
+   // Gradient Center is meaningful for ellipse only (rectangle has
+   // no radial geometry).
+   var gradientVisible = (data.maskTool === "ellipse");
    if ( ui.maskStrengthNC )
       paramVisible ? ui.maskStrengthNC.show() : ui.maskStrengthNC.hide();
    if ( ui.maskFeatherNC )
       paramVisible ? ui.maskFeatherNC.show() : ui.maskFeatherNC.hide();
    if ( ui.gradientCtrNC )
       gradientVisible ? ui.gradientCtrNC.show() : ui.gradientCtrNC.hide();
-   if ( ui.brushRadiusNC )
-      radiusVisible ? ui.brushRadiusNC.show() : ui.brushRadiusNC.hide();
+   // Brush Radius is permanently hidden (Brush tool disabled).
+   if ( ui.brushRadiusNC ) ui.brushRadiusNC.hide();
 }
 
 // Run the full pipeline:
@@ -2614,23 +2647,22 @@ function CombinerDialog()
 
    this.maskToolCombo = new ComboBox( this );
    this.maskToolCombo.editEnabled = false;
-   this.maskToolCombo.addItem( "Off / Pan view" );
-   this.maskToolCombo.addItem( "Ellipse (drag to draw oriented)" );
-   this.maskToolCombo.addItem( "Rectangle (drag to draw)" );
-   this.maskToolCombo.addItem( "Brush (drag to paint)" );
-   this.maskToolCombo.addItem( "Eraser (drag to subtract)" );
+   this.maskToolCombo.addItem( "Off / Pan view" );                  // 0
+   this.maskToolCombo.addItem( "Ellipse (drag to draw oriented)" ); // 1
+   this.maskToolCombo.addItem( "Rectangle (drag to draw)" );        // 2
+   // NOTE: Brush and Eraser tools are temporarily hidden from the UI
+   // pending stability work (see GitHub issues). Internal support
+   // remains in the code.
    this.maskToolCombo.currentItem = 0;
    this.maskToolCombo.toolTip =
       "Select a drawing tool. The mask reduces the contribution of the " +
       "stars layer in painted areas, so gas / nebulosity from the " +
       "starless shows through more clearly.\n" +
       "Ellipse: first click + drag = ends of the major axis (auto-rotated).\n" +
-      "Rectangle: drag from one corner to the opposite corner.\n" +
-      "Brush: paint a soft circle along the cursor while dragging.\n" +
-      "Eraser: subtract from the mask (useful to clean up brush mistakes).";
+      "Rectangle: drag from one corner to the opposite corner.";
    this.maskToolCombo.onItemSelected = function( idx )
    {
-      var newTool = ["pan","ellipse","rect","brush","eraser"][ idx ];
+      var newTool = ["pan","ellipse","rect"][ idx ] || "pan";
       // When switching AWAY from an editable-shape tool, auto-commit
       // any active shape so the user doesn't lose work.
       if ( newTool !== data.maskTool && data.activeShape != null )
@@ -2785,7 +2817,7 @@ function CombinerDialog()
    viewModeRow.add( viewModeLabelFixed );
    viewModeRow.add( this.viewModeCombo, 100 );
    viewModeRow.add( this.compareBtn );
-   viewModeRow.add( this.maskSmoothBtn );
+   // viewModeRow.add( this.maskSmoothBtn );  // Hidden: brush is disabled.
 
    // Row 2: Mask Strength slider
    this.maskStrengthNC = new NumericControl( this );
@@ -2966,7 +2998,7 @@ function CombinerDialog()
    this.sizer.add( this.maskStrengthNC );
    this.sizer.add( this.maskFeatherNC );
    this.sizer.add( this.gradientCtrNC );
-   this.sizer.add( this.brushRadiusNC );
+   // this.sizer.add( this.brushRadiusNC );  // Hidden: brush is disabled.
    this.sizer.add( this.previewFrame, 100 );
    this.sizer.add( btmRow );
    this.sizer.add( this.creditLabel );

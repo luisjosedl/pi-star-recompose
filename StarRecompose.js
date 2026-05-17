@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.18"
+#define VERSION       "1.1.19"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1655,18 +1655,22 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Outline only (no fill) so the user can see the image
-            // through the shape. Color depends on Invert: pink (removes
-            // stars), cyan (keeps stars).
-            g.pen   = new Pen( maskAccentPen(), 2.0 );
-            g.brush = new Brush( 0x00000000 );
-            g.drawPolygon( pts );
+            // Outline only (PJSR's drawPolygon would fill with the
+            // brush color, and Brush(0x00000000) is opaque black in
+            // PJSR even though it looks like ARGB(0,0,0,0)). Stroking
+            // the polygon as a sequence of line segments avoids the
+            // fill entirely.
+            g.pen = new Pen( maskAccentPen(), 2.0 );
+            for ( var pi = 0; pi < pts.length; ++pi )
+            {
+               var pa = pts[ pi ];
+               var pb = pts[ (pi + 1) % pts.length ];
+               g.drawLine( pa.x, pa.y, pb.x, pb.y );
+            }
 
-            // Inner "core" contour: a thin dashed inset matching the
-            // boundary where the solid mask=1 zone ends and the
-            // gradient starts. Drawn only when the shape has a real
-            // gradient (gc < 1) so the user sees what the gradient
-            // looks like even outside the Mask-only B/W view.
+            // Inner "core" contour: a thin dashed inset showing where
+            // the solid mask=1 zone ends and the gradient starts.
+            // Drawn only when the shape has a real gradient (gc < 1).
             var gcShape = (s.gradientCenter != null)
                         ? s.gradientCenter : data.maskGradientCtr;
             if ( s.type === "ellipse" && gcShape < 0.99
@@ -1685,9 +1689,13 @@ function PreviewFrame( parent )
                }
                var corePen = new Pen( maskAccentPen(), 1.0 );
                try { corePen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
-               g.pen   = corePen;
-               g.brush = new Brush( 0x00000000 );
-               g.drawPolygon( corePts );
+               g.pen = corePen;
+               for ( var ci2 = 0; ci2 < corePts.length; ++ci2 )
+               {
+                  var ca = corePts[ ci2 ];
+                  var cb = corePts[ (ci2 + 1) % corePts.length ];
+                  g.drawLine( ca.x, ca.y, cb.x, cb.y );
+               }
             }
 
             // Draw the 4 corner handles + the rotation handle.

@@ -84,6 +84,27 @@ for one-key access.
    processed stars layer as a separate image.
 6. Click **Apply**. A new image (`Combined`) is created with the result.
 
+### Gradient mask editor
+
+Use the mask tools to hide stars over the gas of a galaxy, nebula or
+comet, so the recombined image shows the gas more clearly:
+
+- Pick a tool from the **Mask Tool** combo:
+  - **Ellipse** / **Rectangle**: drag on the preview to draw a shape.
+  - **Brush**: drag to paint freehand strokes.
+- **Mask Strength** controls how much the stars are attenuated where
+  the mask is painted: 0 = no effect, 1 = stars fully hidden.
+- **Mask Feather** sets the soft-edge width of new shapes (as a
+  percentage of the image width).
+- **Brush Radius** controls the brush size, also as a percentage of
+  the image width.
+- **Invert** flips the meaning: stars are kept only inside the painted
+  area and removed everywhere else.
+- **Clear Mask** wipes the mask back to zero.
+
+The painted area shows as a red overlay on the preview while you
+sculpt it. Apply uses the same mask at full resolution.
+
 ### Saving presets as workspace icons
 
 Drag the blue **New Instance** triangle (bottom-left of the dialog) to

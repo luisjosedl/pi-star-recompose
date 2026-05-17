@@ -67,7 +67,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.9"
+#define VERSION       "1.1.10"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -84,6 +84,16 @@
 #define ID_STP_SMALL  "__AD_stars_proc"
 #define ID_PV_SMALL   "__AD_preview"
 #define ID_TMP_FULL   "__AD_proc_full"
+#define ID_MASK       "__AD_mask"
+#define ID_MASK_FULL  "__AD_mask_full"
+#define ID_OVERLAY    "__AD_overlay"
+
+// Mask defaults. Strength: 0..1, how much the mask attenuates the
+// stars. Feather/Brush radii are expressed as a percentage of the
+// image width so the visual size is resolution-independent.
+#define MASK_STRENGTH_DEF   1.0
+#define MASK_FEATHER_DEF    2.0      // percent of image width
+#define BRUSH_RADIUS_DEF    5.0      // percent of image width
 
 // Slider ranges. STRETCH maps DIRECTLY to ArcsinhStretch.stretch (no
 // hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint.
@@ -118,6 +128,14 @@ function CombinerData()
    this.outputId         = "Combined";
    this.keepStars        = false;
    this.starsOutputId    = "Stars_Stretched";
+
+   // Mask state (session-only, not persisted in the script instance).
+   this.maskTool         = "pan";    // "pan" | "ellipse" | "rect" | "brush"
+   this.maskStrength     = MASK_STRENGTH_DEF;
+   this.maskFeatherPct   = MASK_FEATHER_DEF;
+   this.brushRadiusPct   = BRUSH_RADIUS_DEF;
+   this.maskInvert       = false;
+   this.maskOverlayBitmap = null;     // cached visualization bitmap
 
    // Persist current values into the script instance (the New Instance
    // triangle at the bottom-left drags a snapshot to the workspace).
@@ -380,6 +398,14 @@ function syncCacheAndPreview()
          data.starsSmall = buildSmall( data.starsView, ID_ST_SMALL, __cacheSize );
       closeWindowById( ID_STP_SMALL );
       closeWindowById( ID_PV_SMALL );
+      // Resample the mask too so the user's painted shapes stay
+      // visually anchored to the same regions of the image.
+      if ( data.starlessSmall != null )
+      {
+         var sl = data.starlessSmall.mainView.image;
+         resampleMaskTo( sl.width, sl.height );
+         rebuildMaskOverlay();
+      }
    }
    updatePreview();
 }
@@ -451,11 +477,26 @@ function applySCNR( view )
    P.executeOn( view, false );
 }
 
-// 5. Combine:  destView = min(1, starless + starsProcessed)
-function applyCombine( starlessId, starsProcId, destView )
+// 5. Combine:  destView = min(1, starless + starsProcessed * weight)
+//    where weight = 1                       (no mask)
+//                 = (1 - mask * strength)   (normal mask: hide stars where painted)
+//                 = (1 - (1 - mask) * strength)  (inverted mask: keep stars only
+//                                                  where painted)
+function applyCombineWithMask( starlessId, starsProcId, maskId, strength,
+                               invert, destView )
 {
    var pm = new PixelMath;
-   pm.expression          = "min(1," + starlessId + "+" + starsProcId + ")";
+   if ( maskId == null || strength <= 0 )
+   {
+      pm.expression = "min(1," + starlessId + "+" + starsProcId + ")";
+   }
+   else
+   {
+      var maskTerm = invert
+         ? "(1-(1-" + maskId + ")*" + strength.toFixed( 4 ) + ")"
+         : "(1-"      + maskId + "*"     + strength.toFixed( 4 ) + ")";
+      pm.expression = "min(1," + starlessId + "+" + starsProcId + "*" + maskTerm + ")";
+   }
    pm.useSingleExpression = true;
    pm.createNewImage      = false;
    pm.generateOutput      = true;
@@ -468,8 +509,223 @@ function applyCombine( starlessId, starsProcId, destView )
    pm.executeOn( destView, false );
 }
 
+// ===================== Mask helpers =====================
+
+// True if the mask window exists and is the same size as the starless
+// cache, so it can be used in the combine PixelMath as ID_MASK.
+function maskIsActive()
+{
+   var mw = ImageWindow.windowById( ID_MASK );
+   if ( mw.isNull ) return false;
+   if ( data.starlessSmall == null ) return false;
+   var mi = mw.mainView.image;
+   var si = data.starlessSmall.mainView.image;
+   return mi.width === si.width && mi.height === si.height;
+}
+
+// Ensure the mask window exists at the current preview cache size.
+// Created blank (filled with 0). Returns null if there's no starless yet.
+function ensureMaskWindow()
+{
+   if ( data.starlessSmall == null ) return null;
+   var sl = data.starlessSmall.mainView.image;
+   var w  = ImageWindow.windowById( ID_MASK );
+   if ( !w.isNull )
+   {
+      var im = w.mainView.image;
+      if ( im.width === sl.width && im.height === sl.height )
+         return w;
+      w.forceClose();
+   }
+   w = new ImageWindow( sl.width, sl.height, 1, 32, true, false, ID_MASK );
+   refreshViewCombos();
+   // Fill with zero
+   var pm = new PixelMath;
+   pm.expression          = "0";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.executeOn( w.mainView, false );
+   return w;
+}
+
+// Zero the mask out and clear the cached overlay bitmap.
+function clearMask()
+{
+   var w = ImageWindow.windowById( ID_MASK );
+   if ( !w.isNull )
+   {
+      var pm = new PixelMath;
+      pm.expression          = "0";
+      pm.useSingleExpression = true;
+      pm.createNewImage      = false;
+      pm.generateOutput      = true;
+      pm.executeOn( w.mainView, false );
+   }
+   data.maskOverlayBitmap = null;
+}
+
+// If the cache was resampled to a different size, resample the mask
+// too so existing painted areas keep their visual location.
+function resampleMaskTo( newWidth, newHeight )
+{
+   var w = ImageWindow.windowById( ID_MASK );
+   if ( w.isNull ) return;
+   var im = w.mainView.image;
+   if ( im.width === newWidth && im.height === newHeight ) return;
+   var R = new Resample;
+   R.xSize         = newWidth;
+   R.ySize         = newHeight;
+   R.mode          = Resample.prototype.AbsolutePixels;
+   R.absoluteMode  = Resample.prototype.ForceWidthAndHeight;
+   R.interpolation = Resample.prototype.Bilinear;
+   R.executeOn( w.mainView, false );
+}
+
+// Paint a feathered ellipse into the mask at IMAGE coordinates.
+// (cx, cy): center in pixels.  rx, ry: radii in pixels.
+// feather: gradient transition width in pixels (outside the rim).
+function paintEllipseToMask( cx, cy, rx, ry, feather )
+{
+   var w = ensureMaskWindow();
+   if ( w == null ) return;
+   rx = Math.max( 0.5, rx );
+   ry = Math.max( 0.5, ry );
+   var f = Math.max( 0.5, feather );
+   var fnorm = f / Math.min( rx, ry );
+
+   var axTerm = "((x()-(" + cx.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
+   var ayTerm = "((y()-(" + cy.toFixed( 2 ) + "))/" + ry.toFixed( 4 ) + ")";
+   var dist   = "sqrt(" + axTerm + "*" + axTerm + "+" + ayTerm + "*" + ayTerm + ")";
+   var value  = "max(0,min(1,1-(" + dist + "-1)/" + fnorm.toFixed( 4 ) + "))";
+
+   var pm = new PixelMath;
+   pm.expression          = "max($T," + value + ")";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( w.mainView, false );
+}
+
+// Paint a feathered axis-aligned rectangle into the mask.
+// Inside the rectangle the value is 1; outside it falls off linearly
+// to 0 over `feather` pixels measured perpendicular to the edges.
+function paintRectToMask( x1, y1, x2, y2, feather )
+{
+   var w = ensureMaskWindow();
+   if ( w == null ) return;
+   if ( x1 > x2 ) { var tx = x1; x1 = x2; x2 = tx; }
+   if ( y1 > y2 ) { var ty = y1; y1 = y2; y2 = ty; }
+   var f = Math.max( 0.5, feather );
+
+   var dx = "max(0,max(" + x1.toFixed( 2 ) + "-x(),x()-" + x2.toFixed( 2 ) + "))";
+   var dy = "max(0,max(" + y1.toFixed( 2 ) + "-y(),y()-" + y2.toFixed( 2 ) + "))";
+   var dist  = "sqrt(" + dx + "*" + dx + "+" + dy + "*" + dy + ")";
+   var value = "max(0,min(1,1-" + dist + "/" + f.toFixed( 4 ) + "))";
+
+   var pm = new PixelMath;
+   pm.expression          = "max($T," + value + ")";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( w.mainView, false );
+}
+
+// Paint a feathered circle (brush stroke) into the mask. Equivalent
+// to paintEllipseToMask with rx = ry.
+function paintCircleToMask( cx, cy, radius, feather )
+{
+   paintEllipseToMask( cx, cy, radius, radius, feather );
+}
+
+// Rebuild the cached visualization bitmap of the mask. Uses PixelMath
+// to build a red-tinted RGB image (R = mask, G = B = 0), then renders
+// to a Bitmap. The bitmap is later drawn with CompositionOp_Plus so
+// black areas (mask = 0) are visually transparent.
+function rebuildMaskOverlay()
+{
+   closeWindowById( ID_OVERLAY );
+   var maskW = ImageWindow.windowById( ID_MASK );
+   if ( maskW.isNull )
+   {
+      data.maskOverlayBitmap = null;
+      return;
+   }
+   try
+   {
+      var pm = new PixelMath;
+      pm.useSingleExpression  = false;
+      pm.expression0          = ID_MASK;
+      pm.expression1          = "0";
+      pm.expression2          = "0";
+      pm.createNewImage       = true;
+      pm.newImageId           = ID_OVERLAY;
+      pm.newImageColorSpace   = 1;          // RGB
+      pm.newImageSampleFormat = 3;          // 32-bit float
+      pm.showNewImage         = false;
+      pm.executeOn( maskW.mainView, false );
+      refreshViewCombos();
+
+      var ow = ImageWindow.windowById( ID_OVERLAY );
+      if ( !ow.isNull )
+      {
+         data.maskOverlayBitmap = ow.mainView.image.render();
+         ow.forceClose();
+      }
+   }
+   catch ( e )
+   {
+      console.warningln( "* mask overlay: " + e.message );
+      data.maskOverlayBitmap = null;
+   }
+}
+
+// Build a full-resolution mask by copying the preview-sized mask
+// into a new window and resampling up. Used by Apply.
+function buildFullResMask( fullW, fullH )
+{
+   var prevMask = ImageWindow.windowById( ID_MASK );
+   if ( prevMask.isNull ) return null;
+   closeWindowById( ID_MASK_FULL );
+   var pm = prevMask.mainView.image;
+   var w = new ImageWindow( pm.width, pm.height, 1, 32, true, false, ID_MASK_FULL );
+   refreshViewCombos();
+   w.mainView.beginProcess( UndoFlag_NoSwapFile );
+   w.mainView.image.assign( pm );
+   w.mainView.endProcess();
+   if ( pm.width !== fullW || pm.height !== fullH )
+   {
+      var R = new Resample;
+      R.xSize         = fullW;
+      R.ySize         = fullH;
+      R.mode          = Resample.prototype.AbsolutePixels;
+      R.absoluteMode  = Resample.prototype.ForceWidthAndHeight;
+      R.interpolation = Resample.prototype.Bilinear;
+      R.executeOn( w.mainView, false );
+   }
+   return w;
+}
+
+// Convert a percent-of-image-width value to pixels for the given image width.
+function pctToPx( pct, imageWidth )
+{
+   return Math.max( 0.5, imageWidth * pct / 100.0 );
+}
+
 // Run the full pipeline:
-// copy stars -> arcsinh -> (sat + scnr) -> combine.
+// copy stars -> arcsinh -> (sat + scnr) -> combine (with optional mask).
 function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
 {
    copyInto( starsSrcId, procView );
@@ -480,7 +736,9 @@ function runPipeline( starlessId, starsSrcId, procView, targetView, isColor )
       if ( data.removeGreen )
          applySCNR( procView );
    }
-   applyCombine( starlessId, procView.id, targetView );
+   var maskId = (maskIsActive() && data.maskStrength > 0) ? ID_MASK : null;
+   applyCombineWithMask( starlessId, procView.id, maskId,
+                         data.maskStrength, data.maskInvert, targetView );
 }
 
 // ===================== Live preview =====================
@@ -580,9 +838,26 @@ function applyFinal()
             applySCNR( tw.mainView );
       }
 
+      // If the user painted a mask, build a full-resolution version
+      // by resampling the preview-size mask up to source dimensions.
+      var maskFullWindow = null;
+      var maskExpr       = "";
+      if ( maskIsActive() && data.maskStrength > 0 )
+      {
+         maskFullWindow = buildFullResMask( sl.width, sl.height );
+         if ( maskFullWindow != null )
+         {
+            var s = data.maskStrength.toFixed( 4 );
+            maskExpr = data.maskInvert
+               ? "*(1-(1-" + ID_MASK_FULL + ")*" + s + ")"
+               : "*(1-"      + ID_MASK_FULL + "*"     + s + ")";
+         }
+      }
+
       // Final combine creates the output image via createNewImage.
       var pm = new PixelMath;
-      pm.expression           = "min(1," + data.starlessView.id + "+" + ID_TMP_FULL + ")";
+      pm.expression           = "min(1," + data.starlessView.id
+                              + "+" + ID_TMP_FULL + maskExpr + ")";
       pm.useSingleExpression  = true;
       pm.generateOutput       = true;
       pm.rescale              = false;
@@ -595,6 +870,10 @@ function applyFinal()
       pm.newImageSampleFormat = 3;
       pm.showNewImage         = true;
       pm.executeOn( data.starlessView, false );
+
+      if ( maskFullWindow != null )
+         maskFullWindow.forceClose();
+
       success = true;
    }
    catch ( e )
@@ -659,10 +938,14 @@ function cleanup()
    closeWindowById( ID_STP_SMALL );
    closeWindowById( ID_PV_SMALL );
    closeWindowById( ID_TMP_FULL );
-   data.starlessSmall = null;
-   data.starsSmall    = null;
-   data.starsProc     = null;
-   data.previewSmall  = null;
+   closeWindowById( ID_MASK );
+   closeWindowById( ID_MASK_FULL );
+   closeWindowById( ID_OVERLAY );
+   data.starlessSmall     = null;
+   data.starsSmall        = null;
+   data.starsProc         = null;
+   data.previewSmall      = null;
+   data.maskOverlayBitmap = null;
 }
 
 // ===================== Debounce =====================
@@ -696,6 +979,11 @@ function PreviewFrame( parent )
    this._panning   = false;
    this._panStart  = { x: 0, y: 0, panX: 0, panY: 0 };
 
+   // Mask drawing state (in IMAGE coordinates, relative to self.bitmap).
+   this._drawStart   = null;       // {x, y} or null
+   this._drawCurrent = null;
+   this._cursorImg   = null;       // current mouse position in image coords
+
    this.setScaledMinSize( 520, 380 );
    this.cursor = new Cursor( StdCursor_OpenHand );
 
@@ -709,32 +997,112 @@ function PreviewFrame( parent )
       return fit * self.zoomFactor;
    };
 
+   // Convert canvas (cx, cy) coordinates to image (bitmap) coordinates.
+   // Returns null if the cursor is outside the displayed image or there
+   // is no bitmap.
+   this._canvasToImage = function( cx, cy )
+   {
+      if ( self.bitmap == null ) return null;
+      var bw    = self.bitmap.width;
+      var bh    = self.bitmap.height;
+      var cw    = self.width;
+      var ch    = self.height;
+      var scale = self._currentScale();
+      if ( scale == null || scale <= 0 ) return null;
+      var dx = (cw - bw * scale) / 2 + self.panX;
+      var dy = (ch - bh * scale) / 2 + self.panY;
+      var ix = (cx - dx) / scale;
+      var iy = (cy - dy) / scale;
+      if ( ix < 0 || ix >= bw || iy < 0 || iy >= bh ) return null;
+      return { x: ix, y: iy };
+   };
+
+   // Inverse of _canvasToImage: rectangle in canvas space for an image
+   // rectangle. Used to paint rubber bands of in-progress shapes.
+   this._imageRectToCanvas = function( x1, y1, x2, y2 )
+   {
+      if ( self.bitmap == null ) return null;
+      var bw    = self.bitmap.width;
+      var bh    = self.bitmap.height;
+      var cw    = self.width;
+      var ch    = self.height;
+      var scale = self._currentScale();
+      var dx = (cw - bw * scale) / 2 + self.panX;
+      var dy = (ch - bh * scale) / 2 + self.panY;
+      return new Rect( dx + x1 * scale, dy + y1 * scale,
+                       dx + x2 * scale, dy + y2 * scale );
+   };
+
    this.onPaint = function()
    {
       var g = new Graphics( self );
       try
       {
          g.fillRect( self.boundsRect, new Brush( 0xff181818 ) );
-         if ( self.bitmap != null )
-         {
-            var bw    = self.bitmap.width;
-            var bh    = self.bitmap.height;
-            var cw    = self.width;
-            var ch    = self.height;
-            var scale = self._currentScale();
-            var dw    = bw * scale;
-            var dh    = bh * scale;
-            var dx    = (cw - dw) / 2 + self.panX;
-            var dy    = (ch - dh) / 2 + self.panY;
-            g.drawScaledBitmap( new Rect( dx, dy, dx + dw, dy + dh ), self.bitmap );
-         }
-         else
+         if ( self.bitmap == null )
          {
             g.pen = new Pen( 0xff707070 );
             g.drawTextRect(
                self.boundsRect,
                "Select a Starless and a Stars image",
                TextAlign_Center | TextAlign_VertCenter );
+            return;
+         }
+
+         var bw    = self.bitmap.width;
+         var bh    = self.bitmap.height;
+         var cw    = self.width;
+         var ch    = self.height;
+         var scale = self._currentScale();
+         var dw    = bw * scale;
+         var dh    = bh * scale;
+         var dx    = (cw - dw) / 2 + self.panX;
+         var dy    = (ch - dh) / 2 + self.panY;
+         var destRect = new Rect( dx, dy, dx + dw, dy + dh );
+
+         // Base preview
+         g.drawScaledBitmap( destRect, self.bitmap );
+
+         // Mask overlay (red-tinted, additive blend so black areas
+         // remain transparent against the preview).
+         if ( data.maskOverlayBitmap != null )
+         {
+            try
+            {
+               g.compositionOperator = 12;   // CompositionOp_Plus
+               g.drawScaledBitmap( destRect, data.maskOverlayBitmap );
+               g.compositionOperator = 0;
+            }
+            catch ( ce ) { /* fall through quietly */ }
+         }
+
+         // In-progress rubber band for ellipse / rectangle tools.
+         if ( self._drawStart != null && self._drawCurrent != null
+           && (data.maskTool === "ellipse" || data.maskTool === "rect") )
+         {
+            var x1 = Math.min( self._drawStart.x, self._drawCurrent.x );
+            var y1 = Math.min( self._drawStart.y, self._drawCurrent.y );
+            var x2 = Math.max( self._drawStart.x, self._drawCurrent.x );
+            var y2 = Math.max( self._drawStart.y, self._drawCurrent.y );
+            var canvasRect = self._imageRectToCanvas( x1, y1, x2, y2 );
+            g.pen = new Pen( 0xffff66aa, 2.0 );
+            g.brush = new Brush( 0x00000000 );
+            if ( data.maskTool === "ellipse" )
+               g.drawEllipse( canvasRect );
+            else
+               g.drawRect( canvasRect );
+         }
+
+         // Brush cursor ring when the brush tool is active.
+         if ( data.maskTool === "brush" && self._cursorImg != null )
+         {
+            var radPx = pctToPx( data.brushRadiusPct, bw );
+            var cRect = self._imageRectToCanvas(
+               self._cursorImg.x - radPx, self._cursorImg.y - radPx,
+               self._cursorImg.x + radPx, self._cursorImg.y + radPx );
+            g.pen = new Pen( 0xffff66aa, 1.5 );
+            g.brush = new Brush( 0x00000000 );
+            g.drawEllipse( cRect );
          }
       }
       finally
@@ -790,26 +1158,75 @@ function PreviewFrame( parent )
 
    this.onMouseWheel = function( x, y, delta, buttons, modifiers )
    {
+      // Wheel always zooms regardless of current tool.
       var factor = (delta > 0) ? 1.25 : 0.80;
       self._zoomAt( x, y, factor );
    };
 
    this.onMousePress = function( x, y, button, buttons, modifiers )
    {
-      self._panning       = true;
-      self._panStart.x    = x;
-      self._panStart.y    = y;
-      self._panStart.panX = self.panX;
-      self._panStart.panY = self.panY;
-      self.cursor = new Cursor( StdCursor_ClosedHand );
+      // Pan tool: classic behavior.
+      if ( data.maskTool === "pan" || self.bitmap == null )
+      {
+         self._panning       = true;
+         self._panStart.x    = x;
+         self._panStart.y    = y;
+         self._panStart.panX = self.panX;
+         self._panStart.panY = self.panY;
+         self.cursor = new Cursor( StdCursor_ClosedHand );
+         return;
+      }
+
+      // Drawing tools.
+      var p = self._canvasToImage( x, y );
+      if ( p == null ) return;
+      self._drawStart   = p;
+      self._drawCurrent = p;
+      self._cursorImg   = p;
+
+      if ( data.maskTool === "brush" )
+      {
+         var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
+         var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
+         paintCircleToMask( p.x, p.y, radPx, feathr );
+         rebuildMaskOverlay();
+         scheduleUpdate();
+      }
+
+      self.repaint();
    };
 
    this.onMouseMove = function( x, y, buttons, modifiers )
    {
-      if ( !self._panning ) return;
-      self.panX = self._panStart.panX + (x - self._panStart.x);
-      self.panY = self._panStart.panY + (y - self._panStart.y);
-      self.repaint();
+      if ( self._panning )
+      {
+         self.panX = self._panStart.panX + (x - self._panStart.x);
+         self.panY = self._panStart.panY + (y - self._panStart.y);
+         self.repaint();
+         return;
+      }
+
+      // Track cursor for brush ring overlay even when not dragging.
+      var p = self._canvasToImage( x, y );
+      self._cursorImg = p;
+
+      if ( self._drawStart != null && p != null )
+      {
+         self._drawCurrent = p;
+         if ( data.maskTool === "brush" )
+         {
+            var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
+            var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
+            paintCircleToMask( p.x, p.y, radPx, feathr );
+            // Update preview immediately, defer overlay rebuild to release
+            // for performance (overlay rebuild is the slowest step).
+            scheduleUpdate();
+         }
+      }
+
+      // Always repaint so the brush-cursor ring follows the mouse.
+      if ( data.maskTool !== "pan" )
+         self.repaint();
    };
 
    this.onMouseRelease = function( x, y, button, buttons, modifiers )
@@ -818,7 +1235,49 @@ function PreviewFrame( parent )
       {
          self._panning = false;
          self.cursor = new Cursor( StdCursor_OpenHand );
+         return;
       }
+
+      if ( self._drawStart == null )
+         return;
+
+      var sx = self._drawStart.x,   sy = self._drawStart.y;
+      var ex = self._drawCurrent.x, ey = self._drawCurrent.y;
+      var bw = self.bitmap ? self.bitmap.width : 0;
+      var feathr = pctToPx( data.maskFeatherPct, bw );
+
+      if ( data.maskTool === "ellipse" )
+      {
+         var cx = (sx + ex) / 2;
+         var cy = (sy + ey) / 2;
+         var rx = Math.abs( ex - sx ) / 2;
+         var ry = Math.abs( ey - sy ) / 2;
+         if ( rx >= 1 && ry >= 1 )
+            paintEllipseToMask( cx, cy, rx, ry, feathr );
+      }
+      else if ( data.maskTool === "rect" )
+      {
+         var x1 = Math.min( sx, ex ), x2 = Math.max( sx, ex );
+         var y1 = Math.min( sy, ey ), y2 = Math.max( sy, ey );
+         if ( x2 - x1 >= 1 && y2 - y1 >= 1 )
+            paintRectToMask( x1, y1, x2, y2, feathr );
+      }
+      // Brush already painted incrementally on move.
+
+      self._drawStart   = null;
+      self._drawCurrent = null;
+      rebuildMaskOverlay();
+      scheduleUpdate();
+      self.repaint();
+   };
+
+   // Switch the cursor whenever the tool changes externally (combo box).
+   this.refreshCursor = function()
+   {
+      if ( data.maskTool === "pan" )
+         self.cursor = new Cursor( StdCursor_OpenHand );
+      else
+         self.cursor = new Cursor( StdCursor_Cross );
    };
 
    this.onResize = function()
@@ -1080,6 +1539,127 @@ function CombinerDialog()
    keepRow.add( this.starsOutIdEdit );
    keepRow.addStretch();
 
+   // ===================== Mask toolbar =====================
+
+   // Row 1: tool combo + invert check + clear button
+   var maskToolLabel = new Label( this );
+   maskToolLabel.text          = "Mask Tool:";
+   maskToolLabel.setFixedWidth( labelWidth );
+   maskToolLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+
+   this.maskToolCombo = new ComboBox( this );
+   this.maskToolCombo.editEnabled = false;
+   this.maskToolCombo.addItem( "Off / Pan view" );
+   this.maskToolCombo.addItem( "Ellipse (drag to draw)" );
+   this.maskToolCombo.addItem( "Rectangle (drag to draw)" );
+   this.maskToolCombo.addItem( "Brush (drag to paint)" );
+   this.maskToolCombo.currentItem = 0;
+   this.maskToolCombo.toolTip =
+      "Select a drawing tool to paint the mask. The mask reduces the " +
+      "contribution of the stars layer in painted areas, so the gas / " +
+      "nebulosity from the starless shows through more clearly.\n" +
+      "Off / Pan view: classic preview navigation (drag to pan).";
+   this.maskToolCombo.onItemSelected = function( idx )
+   {
+      data.maskTool = ["pan","ellipse","rect","brush"][ idx ];
+      if ( self.previewFrame )
+      {
+         self.previewFrame.refreshCursor();
+         self.previewFrame.repaint();
+      }
+   };
+
+   this.maskInvertCheck = new CheckBox( this );
+   this.maskInvertCheck.text    = "Invert";
+   this.maskInvertCheck.checked = data.maskInvert;
+   this.maskInvertCheck.toolTip =
+      "When checked, the mask SHOWS stars only inside the painted area " +
+      "and hides them everywhere else - useful to keep stars only on a " +
+      "specific region (e.g. a galaxy core) and remove them around it.";
+   this.maskInvertCheck.onCheck = function( c )
+   {
+      data.maskInvert = c;
+      scheduleUpdate();
+   };
+
+   this.maskClearBtn = new PushButton( this );
+   this.maskClearBtn.text    = "Clear Mask";
+   this.maskClearBtn.toolTip = "Reset the mask: stars are restored everywhere.";
+   this.maskClearBtn.onClick = function()
+   {
+      clearMask();
+      if ( self.previewFrame )
+         self.previewFrame.repaint();
+      scheduleUpdate();
+   };
+
+   var maskToolRow = new HorizontalSizer;
+   maskToolRow.spacing = 4;
+   maskToolRow.add( maskToolLabel );
+   maskToolRow.add( this.maskToolCombo, 100 );
+   maskToolRow.add( this.maskInvertCheck );
+   maskToolRow.add( this.maskClearBtn );
+
+   // Row 2: Mask Strength slider
+   this.maskStrengthNC = new NumericControl( this );
+   this.maskStrengthNC.label.text          = "Mask Strength:";
+   this.maskStrengthNC.label.setFixedWidth( labelWidth );
+   this.maskStrengthNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   this.maskStrengthNC.setRange( 0.0, 1.0 );
+   this.maskStrengthNC.slider.setRange( 0, 1000 );
+   this.maskStrengthNC.slider.scaledMinWidth = 360;
+   this.maskStrengthNC.setPrecision( 2 );
+   this.maskStrengthNC.setValue( data.maskStrength );
+   this.maskStrengthNC.edit.minWidth = 70;
+   this.maskStrengthNC.toolTip =
+      "How strongly the mask attenuates the stars in painted areas.\n" +
+      "0 = mask disabled, 1 = stars fully removed where painted.";
+   this.maskStrengthNC.onValueUpdated = function( v )
+   {
+      data.maskStrength = v;
+      scheduleUpdate();
+   };
+
+   // Row 3: Feather and Brush radius (both as % of image width)
+   this.maskFeatherNC = new NumericControl( this );
+   this.maskFeatherNC.label.text          = "Mask Feather:";
+   this.maskFeatherNC.label.setFixedWidth( labelWidth );
+   this.maskFeatherNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   this.maskFeatherNC.setRange( 0.0, 20.0 );
+   this.maskFeatherNC.slider.setRange( 0, 1000 );
+   this.maskFeatherNC.slider.scaledMinWidth = 360;
+   this.maskFeatherNC.setPrecision( 2 );
+   this.maskFeatherNC.setValue( data.maskFeatherPct );
+   this.maskFeatherNC.edit.minWidth = 70;
+   this.maskFeatherNC.toolTip =
+      "Soft edge width of the mask, as a percentage of the image width.\n" +
+      "Applied when a new shape is painted. Existing shapes keep the " +
+      "feather they had at paint time.";
+   this.maskFeatherNC.onValueUpdated = function( v )
+   {
+      data.maskFeatherPct = v;
+   };
+
+   this.brushRadiusNC = new NumericControl( this );
+   this.brushRadiusNC.label.text          = "Brush Radius:";
+   this.brushRadiusNC.label.setFixedWidth( labelWidth );
+   this.brushRadiusNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   this.brushRadiusNC.setRange( 0.5, 25.0 );
+   this.brushRadiusNC.slider.setRange( 0, 1000 );
+   this.brushRadiusNC.slider.scaledMinWidth = 360;
+   this.brushRadiusNC.setPrecision( 2 );
+   this.brushRadiusNC.setValue( data.brushRadiusPct );
+   this.brushRadiusNC.edit.minWidth = 70;
+   this.brushRadiusNC.toolTip =
+      "Radius of the brush stroke, as a percentage of the image width.\n" +
+      "Only used by the Brush tool.";
+   this.brushRadiusNC.onValueUpdated = function( v )
+   {
+      data.brushRadiusPct = v;
+      if ( self.previewFrame )
+         self.previewFrame.repaint();
+   };
+
    // ---- Embedded preview ----
    this.previewFrame = new PreviewFrame( this );
 
@@ -1151,12 +1731,16 @@ function CombinerDialog()
    this.sizer.add( this.boostNC );
    this.sizer.add( scnrRow );
    this.sizer.add( keepRow );
+   this.sizer.add( maskToolRow );
+   this.sizer.add( this.maskStrengthNC );
+   this.sizer.add( this.maskFeatherNC );
+   this.sizer.add( this.brushRadiusNC );
    this.sizer.add( this.previewFrame, 100 );
    this.sizer.add( btmRow );
    this.sizer.add( this.creditLabel );
 
    this.adjustToContents();
-   this.setMinSize( 680, 780 );
+   this.setMinSize( 680, 900 );
 
    // ---- Preselect by name ----
    (function preselect()

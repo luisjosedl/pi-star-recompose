@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.22"
+#define VERSION       "1.1.23"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1006,6 +1006,34 @@ function smoothMaskWindows( sigmaPct )
    }
 }
 
+// Defensive builders for Pen and Brush. Empirically (v1.1.19 .. v1.1.22),
+// the user reported that pens/brushes constructed with a color argument
+// rendered as solid black on their PixInsight build. We don't know
+// whether the constructor signature is `new Pen(color, width)` or
+// `new Pen()` + property assignment, so we set both: pass to the
+// constructor AND assign properties afterward. Also force the pen
+// style to SolidLine explicitly so the default (whatever it might be
+// in PJSR) cannot leave the pen invisible.
+function makePen( color, width, style )
+{
+   var pen = null;
+   try { pen = new Pen( color, width ); } catch ( e ) {}
+   if ( pen == null ) pen = new Pen();
+   try { pen.color = color; } catch ( e ) {}
+   try { pen.width = width; } catch ( e ) {}
+   try { pen.style = (style != null) ? style : 1; } catch ( e ) {}
+   return pen;
+}
+
+function makeBrush( color )
+{
+   var brush = null;
+   try { brush = new Brush( color ); } catch ( e ) {}
+   if ( brush == null ) brush = new Brush();
+   try { brush.color = color; } catch ( e ) {}
+   return brush;
+}
+
 // Stroke a closed polygon as outline only, with a black "shadow" line
 // underneath the colored line for high-contrast visibility on top of
 // arbitrary preview content (works on bright color or pitch black).
@@ -1016,12 +1044,9 @@ function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
    if ( pts == null || pts.length < 2 ) return;
    try { g.antialiasing = true; } catch ( ae ) {}
 
-   var shadowPen = new Pen( 0x7f000000, lineWidth + 1.5 );
-   var colorPen  = new Pen( mainColor,  lineWidth );
-   if ( dashed )
-   {
-      try { shadowPen.style = 2; colorPen.style = 2; } catch ( pe ) {}
-   }
+   var penStyle  = dashed ? 2 : 1;
+   var shadowPen = makePen( 0x7f000000, lineWidth + 1.5, penStyle );
+   var colorPen  = makePen( mainColor,  lineWidth,        penStyle );
 
    // Preferred path: pen-only polygon stroke. Brush state is ignored.
    var useStroke = true;
@@ -1665,10 +1690,10 @@ function PreviewFrame( parent )
       var g = new Graphics( self );
       try
       {
-         g.fillRect( self.boundsRect, new Brush( 0xff181818 ) );
+         g.fillRect( self.boundsRect, makeBrush( 0x7f181818 ) );
          if ( self.bitmap == null )
          {
-            g.pen = new Pen( 0xff707070 );
+            g.pen = makePen( 0x7f707070, 1.0 );
             g.drawTextRect(
                self.boundsRect,
                "Select a Starless and a Stars image",
@@ -1787,13 +1812,13 @@ function PreviewFrame( parent )
                   // an inscribed curved-arrow icon so it's visually
                   // distinct from the resize handles. Colors use
                   // alpha 0x7f to avoid PJSR's int32-wrap color bug.
-                  g.pen   = new Pen( 0x7f66ff66, 1.5 );
-                  g.brush = new Brush( 0x7f224422 );
+                  g.pen   = makePen( 0x7f66ff66, 1.5 );
+                  g.brush = makeBrush( 0x7f224422 );
                   g.drawEllipse( new Rect( hc.x0 - 9, hc.y0 - 9,
                                            hc.x0 + 9, hc.y0 + 9 ) );
                   // Curved arrow inside (small "C" with arrowhead).
-                  g.pen   = new Pen( 0x7fffffff, 1.4 );
-                  g.brush = new Brush( 0x00000000 );
+                  g.pen   = makePen( 0x7fffffff, 1.4 );
+                  g.brush = makeBrush( 0x00000000 );
                   var arcR = 4.5;
                   var arcN = 14;
                   var arcStart = -Math.PI / 2;          // start at top
@@ -1828,14 +1853,14 @@ function PreviewFrame( parent )
                   var topWx = s.cx + localTopX * co - localTopY * si;
                   var topWy = s.cy + localTopX * si + localTopY * co;
                   var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
-                  g.pen = new Pen( 0x7f66ff66, 1.5 );
+                  g.pen = makePen( 0x7f66ff66, 1.5 );
                   g.drawLine( topC.x0, topC.y0, hc.x0, hc.y0 );
                }
                else
                {
                   // Filled squares for resize handles, accent color.
-                  g.pen   = new Pen( 0x7fffffff, 1.5 );
-                  g.brush = new Brush( maskAccentSolid() );
+                  g.pen   = makePen( 0x7fffffff, 1.5 );
+                  g.brush = makeBrush( maskAccentSolid() );
                   g.drawRect( new Rect( hc.x0 - 5, hc.y0 - 5,
                                         hc.x0 + 5, hc.y0 + 5 ) );
                }
@@ -1849,8 +1874,8 @@ function PreviewFrame( parent )
          // on mouse release (which is too slow per frame).
          if ( self._brushTrail.length > 0 )
          {
-            g.brush = new Brush( maskAccentFill() );
-            g.pen   = new Pen( maskAccentPen(), 1.0 );
+            g.brush = makeBrush( maskAccentFill() );
+            g.pen   = makePen( maskAccentPen(), 1.0 );
             for ( var ti = 0; ti < self._brushTrail.length; ++ti )
             {
                var t = self._brushTrail[ti];
@@ -1878,14 +1903,12 @@ function PreviewFrame( parent )
             var cOuter = self._imageRectToCanvas(
                self._cursorImg.x - (radPx+feathPx), self._cursorImg.y - (radPx+feathPx),
                self._cursorImg.x + (radPx+feathPx), self._cursorImg.y + (radPx+feathPx) );
-            g.brush = new Brush( 0x00000000 );
-            g.pen   = new Pen( maskAccentPen(), 1.5 );
+            g.brush = makeBrush( 0x00000000 );
+            g.pen   = makePen( maskAccentPen(), 1.5 );
             g.drawEllipse( cInner );
             if ( feathPx > 0.5 )
             {
-               var dashPen = new Pen( maskAccentPen(), 1.0 );
-               try { dashPen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
-               g.pen = dashPen;
+               g.pen = makePen( maskAccentPen(), 1.0, 2 );  // dashed
                g.drawEllipse( cOuter );
             }
             // Inner core ring (where solid mask=1 zone ends).
@@ -1895,9 +1918,7 @@ function PreviewFrame( parent )
                var cCore = self._imageRectToCanvas(
                   self._cursorImg.x - coreRad, self._cursorImg.y - coreRad,
                   self._cursorImg.x + coreRad, self._cursorImg.y + coreRad );
-               var coreDashPen = new Pen( maskAccentPen(), 1.0 );
-               try { coreDashPen.style = 2; } catch ( pe ) {}
-               g.pen = coreDashPen;
+               g.pen = makePen( maskAccentPen(), 1.0, 2 );  // dashed
                g.drawEllipse( cCore );
             }
          }

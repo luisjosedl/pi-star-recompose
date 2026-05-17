@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.21"
+#define VERSION       "1.1.22"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1009,20 +1009,36 @@ function smoothMaskWindows( sigmaPct )
 // Stroke a closed polygon as outline only, with a black "shadow" line
 // underneath the colored line for high-contrast visibility on top of
 // arbitrary preview content (works on bright color or pitch black).
-// drawLine is used (not drawPolygon) because PJSR's drawPolygon
-// treats Brush(0x00000000) as opaque black instead of transparent,
-// filling the polygon and hiding the underlying image.
+// Tries Graphics.strokePolygon first (pen-only, no brush involved);
+// falls back to a drawLine loop if strokePolygon isn't available.
 function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
 {
    if ( pts == null || pts.length < 2 ) return;
-   var shadowPen = new Pen( 0xff000000, lineWidth + 1.5 );
+   try { g.antialiasing = true; } catch ( ae ) {}
+
+   var shadowPen = new Pen( 0x7f000000, lineWidth + 1.5 );
    var colorPen  = new Pen( mainColor,  lineWidth );
    if ( dashed )
    {
       try { shadowPen.style = 2; colorPen.style = 2; } catch ( pe ) {}
    }
 
-   // Two passes: shadow first (wider, black), then color on top.
+   // Preferred path: pen-only polygon stroke. Brush state is ignored.
+   var useStroke = true;
+   try
+   {
+      g.pen = shadowPen;
+      g.strokePolygon( pts );
+      g.pen = colorPen;
+      g.strokePolygon( pts );
+   }
+   catch ( spe )
+   {
+      useStroke = false;
+   }
+   if ( useStroke ) return;
+
+   // Fallback: explicit line loop.
    g.pen = shadowPen;
    for ( var i = 0; i < pts.length; ++i )
    {
@@ -1169,24 +1185,30 @@ function discardActiveShape()
    data.activeShape = null;
 }
 
-// Visual accent colors for the active shape and brush ring. Pink in
-// normal mode (the mask REMOVES stars in painted areas), cyan in
-// invert mode (the mask KEEPS stars in painted areas). Gray when the
-// Eraser tool is active so the user clearly sees they're subtracting.
+// Visual accent colors. NOTE on alpha: in PJSR, ARGB color literals
+// with alpha 0x80..0xff are > 2^31 and JavaScript treats them as
+// signed-int32 negatives, which PJSR's color bridge can sanitize to
+// 0 (= black) for some draw calls. We deliberately use alpha 0x7f
+// (50% opacity) so the value stays in int32 positive territory and
+// renders reliably. We also pick PURE SATURATED RGB primaries so the
+// lines are unmistakable on top of the preview.
+//   Pink (magenta) = mask REMOVES stars in painted areas
+//   Cyan           = mask KEEPS stars (invert mode)
+//   White          = eraser
 function maskAccentPen()
 {
-   if ( data.maskTool === "eraser" ) return 0xffbbbbbb;
-   return data.maskInvert ? 0xff66ccff : 0xffff66aa;
+   if ( data.maskTool === "eraser" ) return 0x7fffffff;
+   return data.maskInvert ? 0x7f00ffff : 0x7fff00ff;
 }
 function maskAccentFill()
 {
-   if ( data.maskTool === "eraser" ) return 0x66bbbbbb;
-   return data.maskInvert ? 0x6666ccff : 0x66ff66aa;
+   if ( data.maskTool === "eraser" ) return 0x40ffffff;
+   return data.maskInvert ? 0x4000ffff : 0x40ff00ff;
 }
 function maskAccentSolid()
 {
-   if ( data.maskTool === "eraser" ) return 0xffbbbbbb;
-   return data.maskInvert ? 0xff66ccff : 0xffff66aa;
+   if ( data.maskTool === "eraser" ) return 0x7fffffff;
+   return data.maskInvert ? 0x7f00ffff : 0x7fff00ff;
 }
 
 // Update the Apply Edits button text + enabled state to reflect
@@ -1763,13 +1785,14 @@ function PreviewFrame( parent )
                {
                   // Larger green circle for the rotation handle, with
                   // an inscribed curved-arrow icon so it's visually
-                  // distinct from the resize handles.
-                  g.pen   = new Pen( 0xff66ff66, 1.5 );
-                  g.brush = new Brush( 0xff224422 );
+                  // distinct from the resize handles. Colors use
+                  // alpha 0x7f to avoid PJSR's int32-wrap color bug.
+                  g.pen   = new Pen( 0x7f66ff66, 1.5 );
+                  g.brush = new Brush( 0x7f224422 );
                   g.drawEllipse( new Rect( hc.x0 - 9, hc.y0 - 9,
                                            hc.x0 + 9, hc.y0 + 9 ) );
                   // Curved arrow inside (small "C" with arrowhead).
-                  g.pen   = new Pen( 0xffffffff, 1.4 );
+                  g.pen   = new Pen( 0x7fffffff, 1.4 );
                   g.brush = new Brush( 0x00000000 );
                   var arcR = 4.5;
                   var arcN = 14;
@@ -1805,13 +1828,13 @@ function PreviewFrame( parent )
                   var topWx = s.cx + localTopX * co - localTopY * si;
                   var topWy = s.cy + localTopX * si + localTopY * co;
                   var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
-                  g.pen = new Pen( 0xff66ff66, 1.5 );
+                  g.pen = new Pen( 0x7f66ff66, 1.5 );
                   g.drawLine( topC.x0, topC.y0, hc.x0, hc.y0 );
                }
                else
                {
-                  // Filled squares for resize, accent color.
-                  g.pen   = new Pen( 0xffffffff, 1.5 );
+                  // Filled squares for resize handles, accent color.
+                  g.pen   = new Pen( 0x7fffffff, 1.5 );
                   g.brush = new Brush( maskAccentSolid() );
                   g.drawRect( new Rect( hc.x0 - 5, hc.y0 - 5,
                                         hc.x0 + 5, hc.y0 + 5 ) );

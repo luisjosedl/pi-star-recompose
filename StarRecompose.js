@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.20"
+#define VERSION       "1.1.21"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -820,6 +820,13 @@ function paintEllipseToWindow( targetWindow, cx, cy, rx, ry, feather, gc )
    pm.executeOn( targetWindow.mainView, false );
 }
 
+// Throttle for brush/eraser PixelMath calls. PixelMath on the full
+// mask image takes ~10-50 ms per dab. Without throttling, fast drag
+// events stack up faster than they can complete, locking the PI
+// view and lagging the UI. This timestamp limits paints to ~25 Hz.
+var __lastMaskPaintTime = 0;
+var MASK_PAINT_INTERVAL = 40;     // ms
+
 // Reentrancy guard for brush/eraser PixelMath calls. PixInsight's
 // PixelMath.executeOn() internally pumps the event loop to keep the
 // UI responsive, which can fire the next mouseMove event mid-execute.
@@ -912,7 +919,9 @@ function rebuildMaskOverlay()
    {
       var pm = new PixelMath;
       pm.useSingleExpression  = false;
-      pm.expression0          = ID_MASK;
+      // Subtler red than before so bright preview content
+      // (galaxies, nebulae) is not totally washed out red.
+      pm.expression0          = "0.5*" + ID_MASK;
       pm.expression1          = "0";
       pm.expression2          = "0";
       pm.createNewImage       = true;
@@ -920,6 +929,9 @@ function rebuildMaskOverlay()
       pm.newImageColorSpace   = 1;          // RGB
       pm.newImageSampleFormat = 3;          // 32-bit float
       pm.showNewImage         = false;
+      pm.truncate             = true;
+      pm.truncateLower        = 0.0;
+      pm.truncateUpper        = 1.0;
       pm.executeOn( maskW.mainView, false );
       refreshViewCombos();
 
@@ -967,6 +979,31 @@ function buildFullResMask( fullW, fullH )
 function pctToPx( pct, imageWidth )
 {
    return Math.max( 0.5, imageWidth * pct / 100.0 );
+}
+
+// Smooth (Gaussian blur) the committed and pending mask windows in
+// place. sigmaPct is expressed as a percentage of the image width so
+// the effect is resolution-independent. Used by the "Smooth" button
+// to "difuminar" (soften) hard edges left by brush strokes or after
+// a quick committed shape.
+function smoothMaskWindows( sigmaPct )
+{
+   if ( data.starlessSmall == null ) return;
+   var imWid = data.starlessSmall.mainView.image.width;
+   var sigma = Math.max( 0.5, Math.min( 40, imWid * sigmaPct / 100 ) );
+   var ids = [ ID_MASK, ID_MASK_PENDING ];
+   for ( var i = 0; i < ids.length; ++i )
+   {
+      var w = ImageWindow.windowById( ids[i] );
+      if ( w.isNull ) continue;
+      var conv = new Convolution;
+      conv.mode          = Convolution.prototype.Parametric;
+      conv.sigma         = sigma;
+      conv.shape         = 2.0;            // Gaussian
+      conv.aspectRatio   = 1.0;
+      conv.rotationAngle = 0.0;
+      conv.executeOn( w.mainView, false );
+   }
 }
 
 // Stroke a closed polygon as outline only, with a black "shadow" line
@@ -2061,13 +2098,21 @@ function PreviewFrame( parent )
          {
             var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
             var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
-            if ( data.maskTool === "brush" )
-               paintCircleToPending( p.x, p.y, radPx, feathr );
-            else
-               eraseCircleFromMasks( p.x, p.y, radPx, feathr );
-            // Append to the real-time trail for instant visual feedback.
+            // Throttled actual mask paint (keeps PC responsive).
+            var now = Date.now();
+            if ( now - __lastMaskPaintTime >= MASK_PAINT_INTERVAL )
+            {
+               __lastMaskPaintTime = now;
+               if ( data.maskTool === "brush" )
+                  paintCircleToPending( p.x, p.y, radPx, feathr );
+               else
+                  eraseCircleFromMasks( p.x, p.y, radPx, feathr );
+               scheduleUpdate();
+            }
+            // The visual trail keeps recording every move, so the user
+            // still gets smooth real-time feedback regardless of the
+            // paint throttle.
             self._brushTrail.push( { x: p.x, y: p.y, r: radPx } );
-            scheduleUpdate();
          }
          else if ( data.activeShape != null )
          {
@@ -2181,6 +2226,19 @@ function PreviewFrame( parent )
       if ( self._brushTrail.length > 0
         || data.maskTool === "brush" || data.maskTool === "eraser" )
       {
+         // Final paint at the release position, in case the brush
+         // throttle skipped the last few mouse-move events.
+         if ( self._brushTrail.length > 0 && self.bitmap != null
+           && (data.maskTool === "brush" || data.maskTool === "eraser") )
+         {
+            var last = self._brushTrail[ self._brushTrail.length - 1 ];
+            var lr   = pctToPx( data.brushRadiusPct, self.bitmap.width );
+            var lf   = pctToPx( data.maskFeatherPct, self.bitmap.width );
+            if ( data.maskTool === "brush" )
+               paintCircleToPending( last.x, last.y, lr, lf );
+            else
+               eraseCircleFromMasks( last.x, last.y, lr, lf );
+         }
          rebuildMaskOverlay();
          rebuildPendingOverlay();
          self._brushTrail = [];
@@ -2583,9 +2641,9 @@ function CombinerDialog()
    // 3-mode view selector for the preview canvas.
    this.viewModeCombo = new ComboBox( this );
    this.viewModeCombo.editEnabled = false;
-   this.viewModeCombo.addItem( "Edit (image stays visible)" );  // 0 = edit
-   this.viewModeCombo.addItem( "Result (mask applied)" );       // 1 = result
-   this.viewModeCombo.addItem( "Mask only (B/W)" );             // 2 = mask
+   this.viewModeCombo.addItem( "Image only (mask effect OFF)" );  // 0 = edit
+   this.viewModeCombo.addItem( "Image + mask effect (preview Apply)" );  // 1 = result
+   this.viewModeCombo.addItem( "Mask only (B/W)" );               // 2 = mask
    this.viewModeCombo.currentItem =
         (data.viewMode === "result") ? 1
       : (data.viewMode === "mask"  ) ? 2 : 0;
@@ -2628,6 +2686,50 @@ function CombinerDialog()
    maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
 
+   // Quick "Compare" button: toggle Edit <-> Result so the user can
+   // flip between with/without mask effect with a single click.
+   this.compareBtn = new PushButton( this );
+   this.compareBtn.text    = "Compare";
+   this.compareBtn.toolTip =
+      "Quickly toggle between 'Image only' and 'Image + mask effect' " +
+      "to compare the before / after of the mask. Same as switching " +
+      "the Preview View combo between options 1 and 2.\n" +
+      "Shortcut: M.";
+   this.compareBtn.onClick = function()
+   {
+      if ( data.viewMode === "edit" )
+      {
+         data.viewMode = "result";
+         self.viewModeCombo.currentItem = 1;
+      }
+      else
+      {
+         data.viewMode = "edit";
+         self.viewModeCombo.currentItem = 0;
+      }
+      scheduleUpdate();
+      if ( self.previewFrame ) self.previewFrame.repaint();
+   };
+
+   // "Smooth" button: Gaussian blur of the mask (committed AND pending)
+   // to soften hard brush edges or shape boundaries. Each click adds
+   // more smoothing - run twice for stronger blur.
+   this.maskSmoothBtn = new PushButton( this );
+   this.maskSmoothBtn.text    = "Smooth";
+   this.maskSmoothBtn.toolTip =
+      "Apply a Gaussian blur (0.5% of image width) to the mask to " +
+      "soften hard brush edges or sharp shape boundaries. Useful after " +
+      "painting freehand strokes. Click again for stronger smoothing.";
+   this.maskSmoothBtn.onClick = function()
+   {
+      smoothMaskWindows( 0.5 );
+      rebuildMaskOverlay();
+      rebuildPendingOverlay();
+      updateCommitButton();
+      if ( self.previewFrame ) self.previewFrame.repaint();
+      scheduleUpdate();
+   };
+
    // A second row for the view-mode selector. Kept separate from the
    // mask tool row so the tool row stays compact.
    var viewModeRow = new HorizontalSizer;
@@ -2638,6 +2740,8 @@ function CombinerDialog()
    viewModeLabelFixed.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    viewModeRow.add( viewModeLabelFixed );
    viewModeRow.add( this.viewModeCombo, 100 );
+   viewModeRow.add( this.compareBtn );
+   viewModeRow.add( this.maskSmoothBtn );
 
    // Row 2: Mask Strength slider
    this.maskStrengthNC = new NumericControl( this );
@@ -2870,6 +2974,23 @@ function CombinerDialog()
          updateCommitButton();
          if ( self.previewFrame ) self.previewFrame.repaint();
          scheduleUpdate();
+         handled = true;
+      }
+      else if ( keyCode === Key_M )
+      {
+         // Toggle Edit <-> Result modes (quick before/after comparison).
+         if ( data.viewMode === "edit" )
+         {
+            data.viewMode = "result";
+            self.viewModeCombo.currentItem = 1;
+         }
+         else if ( data.viewMode === "result" )
+         {
+            data.viewMode = "edit";
+            self.viewModeCombo.currentItem = 0;
+         }
+         scheduleUpdate();
+         if ( self.previewFrame ) self.previewFrame.repaint();
          handled = true;
       }
       return handled;

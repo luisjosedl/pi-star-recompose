@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.13"
+#define VERSION       "1.1.14"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -678,6 +678,38 @@ function paintCircleToMask( cx, cy, radius, feather )
    paintEllipseToMask( cx, cy, radius, radius, feather );
 }
 
+// Erase a feathered circle from the mask: subtract the brush profile
+// from the current mask values, clamped to 0. The mask window MUST
+// already exist (eraser doesn't create one because there's nothing
+// to erase from a blank mask).
+function eraseCircleFromMask( cx, cy, radius, feather )
+{
+   var w = ImageWindow.windowById( ID_MASK );
+   if ( w.isNull ) return;     // nothing to erase
+   var rx = Math.max( 0.5, radius );
+   var ry = rx;
+   var f  = Math.max( 0.5, feather );
+   var fnorm = (f / rx).toFixed( 4 );
+
+   var axTerm = "((x()-(" + cx.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
+   var ayTerm = "((y()-(" + cy.toFixed( 2 ) + "))/" + rx.toFixed( 4 ) + ")";
+   var dist   = "sqrt(" + axTerm + "*" + axTerm + "+" + ayTerm + "*" + ayTerm + ")";
+   var value  = "max(0,min(1,1-(" + dist + "-1)/" + fnorm + "))";
+
+   var pm = new PixelMath;
+   pm.expression          = "max(0,$T-" + value + ")";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( w.mainView, false );
+}
+
 // Rebuild the cached visualization bitmap of the mask. Uses PixelMath
 // to build a red-tinted RGB image (R = mask, G = B = 0), then renders
 // to a Bitmap. The bitmap is later drawn with CompositionOp_Plus so
@@ -903,18 +935,21 @@ function discardActiveShape()
 
 // Visual accent colors for the active shape and brush ring. Pink in
 // normal mode (the mask REMOVES stars in painted areas), cyan in
-// invert mode (the mask KEEPS stars in painted areas - opposite
-// semantics, hence opposite color).
+// invert mode (the mask KEEPS stars in painted areas). Gray when the
+// Eraser tool is active so the user clearly sees they're subtracting.
 function maskAccentPen()
 {
+   if ( data.maskTool === "eraser" ) return 0xffbbbbbb;
    return data.maskInvert ? 0xff66ccff : 0xffff66aa;
 }
 function maskAccentFill()
 {
+   if ( data.maskTool === "eraser" ) return 0x66bbbbbb;
    return data.maskInvert ? 0x6666ccff : 0x66ff66aa;
 }
 function maskAccentSolid()
 {
+   if ( data.maskTool === "eraser" ) return 0xffbbbbbb;
    return data.maskInvert ? 0xff66ccff : 0xffff66aa;
 }
 
@@ -937,15 +972,19 @@ function updateCommitButton()
 
 // Show or hide the three mask parameter rows based on the current tool.
 // When the user has the Pan view selected (mask "off"), the rows are
-// hidden to declutter the dialog.
+// hidden to declutter the dialog. Uses hide()/show() because the
+// `.visible` property doesn't propagate to the sizer in PJSR.
 function updateMaskRowsVisibility()
 {
    if ( ui == null ) return;
-   var visible = (data.maskTool !== "pan");
-   if ( ui.maskStrengthNC ) ui.maskStrengthNC.visible = visible;
-   if ( ui.maskFeatherNC  ) ui.maskFeatherNC.visible  = visible;
-   if ( ui.brushRadiusNC  )
-      ui.brushRadiusNC.visible = (data.maskTool === "brush");
+   var paramVisible = (data.maskTool !== "pan");
+   var radiusVisible = (data.maskTool === "brush" || data.maskTool === "eraser");
+   if ( ui.maskStrengthNC )
+      paramVisible ? ui.maskStrengthNC.show() : ui.maskStrengthNC.hide();
+   if ( ui.maskFeatherNC )
+      paramVisible ? ui.maskFeatherNC.show() : ui.maskFeatherNC.hide();
+   if ( ui.brushRadiusNC )
+      radiusVisible ? ui.brushRadiusNC.show() : ui.brushRadiusNC.hide();
 }
 
 // Run the full pipeline:
@@ -1273,9 +1312,19 @@ function PreviewFrame( parent )
    this._drawStart   = null;       // {x, y} or null
    this._drawCurrent = null;
    this._cursorImg   = null;       // current mouse position in image coords
+   this._brushTrail  = [];         // [{x, y, r, erasing}] for real-time
+                                   // brush feedback; cleared on release
 
    this.setScaledMinSize( 520, 380 );
    this.cursor = new Cursor( StdCursor_OpenHand );
+
+   // CRITICAL for hover cursors and the brush ring: without mouse
+   // tracking, Qt only sends mouseMoveEvent while a button is held,
+   // so cursors over handles wouldn't change. PJSR exposes this as
+   // the `mouseTracking` property on Control; try a few names because
+   // it has varied between versions.
+   try { this.mouseTracking = true; } catch ( mt ) { /* ignore */ }
+   try { this.trackingEnabled = true; } catch ( mt ) { /* ignore */ }
 
    var self = this;
 
@@ -1353,10 +1402,17 @@ function PreviewFrame( parent )
          // Base preview
          g.drawScaledBitmap( destRect, self.bitmap );
 
+         // In "Preview only" mode, hide ALL editing UI (overlay, active
+         // shape, handles, brush ring, trail). The user sees just the
+         // recombined image, no tinting or controls.
+         if ( data.viewMode === "preview" )
+         {
+            return;     // exit onPaint with just the bare preview drawn
+         }
+
          // Mask overlay (red-tinted, additive blend so black areas
          // remain transparent against the preview). Drawn only in
-         // "blend" mode. Skipped in "preview" (clean) and "mask" (the
-         // preview already IS the mask).
+         // "blend" mode. Skipped in "mask" (the preview already IS the mask).
          if ( data.maskOverlayBitmap != null && data.viewMode === "blend" )
          {
             try
@@ -1368,9 +1424,9 @@ function PreviewFrame( parent )
             catch ( ce ) { /* fall through quietly */ }
          }
 
-         // Active shape (editable): filled outline + handles. Drawn on
-         // top of any overlay so the user can always see and grab it.
-         // Only shown for the geometric tools (ellipse / rect).
+         // Active shape (editable): outline + handles. Drawn on top of
+         // any overlay so the user can always see and grab it. Only
+         // shown for the geometric tools (ellipse / rect).
          if ( data.activeShape != null
            && (data.maskTool === "ellipse" || data.maskTool === "rect") )
          {
@@ -1406,10 +1462,11 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Translucent fill + bright outline. Color depends on the
-            // Invert flag: pink = removes stars, cyan = keeps stars.
+            // Outline only (no fill) so the user can see the image
+            // through the shape. Color depends on Invert: pink (removes
+            // stars), cyan (keeps stars).
             g.pen   = new Pen( maskAccentPen(), 2.0 );
-            g.brush = new Brush( maskAccentFill() );
+            g.brush = new Brush( 0x00000000 );
             g.drawPolygon( pts );
 
             // Draw the 4 corner handles + the rotation handle.
@@ -1445,10 +1502,29 @@ function PreviewFrame( parent )
             }
          }
 
-         // Brush cursor ring when the brush tool is active. Two rings:
-         // solid = brush radius, dashed = brush radius + feather (where
-         // the painted alpha falls off to zero).
-         if ( data.maskTool === "brush" && self._cursorImg != null )
+         // Real-time brush / eraser trail. While the user is dragging
+         // a brush or eraser stroke, render each dab as a translucent
+         // ring on the canvas so they get immediate visual feedback,
+         // even though the actual mask overlay bitmap is only rebuilt
+         // on mouse release (which is too slow per frame).
+         if ( self._brushTrail.length > 0 )
+         {
+            g.brush = new Brush( maskAccentFill() );
+            g.pen   = new Pen( maskAccentPen(), 1.0 );
+            for ( var ti = 0; ti < self._brushTrail.length; ++ti )
+            {
+               var t = self._brushTrail[ti];
+               var tc = self._imageRectToCanvas(
+                  t.x - t.r, t.y - t.r,
+                  t.x + t.r, t.y + t.r );
+               g.drawEllipse( tc );
+            }
+         }
+
+         // Brush / eraser cursor ring at the current mouse position.
+         // Two rings: solid = radius, dashed = radius + feather edge.
+         var isBrushyTool = (data.maskTool === "brush" || data.maskTool === "eraser");
+         if ( isBrushyTool && self._cursorImg != null )
          {
             var radPx    = pctToPx( data.brushRadiusPct, bw );
             var feathPx  = pctToPx( data.maskFeatherPct, bw );
@@ -1463,7 +1539,6 @@ function PreviewFrame( parent )
             g.drawEllipse( cInner );
             if ( feathPx > 0.5 )
             {
-               // Dashed outer ring for the feather edge.
                var dashPen = new Pen( maskAccentPen(), 1.0 );
                try { dashPen.style = 2; } catch ( pe ) { /* PenStyle_Dash */ }
                g.pen = dashPen;
@@ -1597,8 +1672,8 @@ function PreviewFrame( parent )
          return;
       }
 
-      // Brush tool: paint immediately at the cursor.
-      if ( data.maskTool === "brush" )
+      // Brush / Eraser tool: paint immediately at the cursor.
+      if ( data.maskTool === "brush" || data.maskTool === "eraser" )
       {
          var p0 = self._canvasToImage( x, y );
          if ( p0 == null ) return;
@@ -1608,8 +1683,11 @@ function PreviewFrame( parent )
          self._cursorImg   = p0;
          var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
          var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
-         paintCircleToMask( p0.x, p0.y, radPx, feathr );
-         rebuildMaskOverlay();
+         if ( data.maskTool === "brush" )
+            paintCircleToMask( p0.x, p0.y, radPx, feathr );
+         else
+            eraseCircleFromMask( p0.x, p0.y, radPx, feathr );
+         self._brushTrail = [ { x: p0.x, y: p0.y, r: radPx } ];
          scheduleUpdate();
          self.repaint();
          return;
@@ -1671,11 +1749,17 @@ function PreviewFrame( parent )
 
       if ( self._dragMode != null && p != null )
       {
-         if ( data.maskTool === "brush" && self._dragMode === "draw" )
+         var isBrushy = (data.maskTool === "brush" || data.maskTool === "eraser");
+         if ( isBrushy && self._dragMode === "draw" )
          {
             var radPx  = pctToPx( data.brushRadiusPct, self.bitmap.width );
             var feathr = pctToPx( data.maskFeatherPct, self.bitmap.width );
-            paintCircleToMask( p.x, p.y, radPx, feathr );
+            if ( data.maskTool === "brush" )
+               paintCircleToMask( p.x, p.y, radPx, feathr );
+            else
+               eraseCircleFromMask( p.x, p.y, radPx, feathr );
+            // Append to the real-time trail for instant visual feedback.
+            self._brushTrail.push( { x: p.x, y: p.y, r: radPx } );
             scheduleUpdate();
          }
          else if ( data.activeShape != null )
@@ -1683,12 +1767,29 @@ function PreviewFrame( parent )
             var s = data.activeShape;
             if ( self._dragMode === "draw" )
             {
-               // Define a bounding-box ellipse/rect from drag start to p.
-               s.cx = (self._drawStart.x + p.x) / 2;
-               s.cy = (self._drawStart.y + p.y) / 2;
-               s.rx = Math.max( 1, Math.abs( p.x - self._drawStart.x ) / 2 );
-               s.ry = Math.max( 1, Math.abs( p.y - self._drawStart.y ) / 2 );
-               s.angle = 0;
+               if ( s.type === "ellipse" )
+               {
+                  // Major-axis-oriented: first click and drag endpoint
+                  // become the two ends of the major axis. Minor axis
+                  // defaults to 1/3 of the major (good for galaxies).
+                  var dxa = p.x - self._drawStart.x;
+                  var dya = p.y - self._drawStart.y;
+                  var len = Math.sqrt( dxa*dxa + dya*dya );
+                  s.cx = (self._drawStart.x + p.x) / 2;
+                  s.cy = (self._drawStart.y + p.y) / 2;
+                  s.rx = Math.max( 1, len / 2 );
+                  s.ry = Math.max( 1, len / 6 );      // 3:1 default aspect
+                  s.angle = (len > 0.5) ? Math.atan2( dya, dxa ) : 0;
+               }
+               else
+               {
+                  // Rectangle: bounding-box, two opposite corners.
+                  s.cx = (self._drawStart.x + p.x) / 2;
+                  s.cy = (self._drawStart.y + p.y) / 2;
+                  s.rx = Math.max( 1, Math.abs( p.x - self._drawStart.x ) / 2 );
+                  s.ry = Math.max( 1, Math.abs( p.y - self._drawStart.y ) / 2 );
+                  s.angle = 0;
+               }
             }
             else if ( self._dragMode === "move" )
             {
@@ -1745,7 +1846,7 @@ function PreviewFrame( parent )
       {
          if ( data.maskTool === "pan" )
             self._setCursorId( StdCursor_OpenHand );
-         else if ( data.maskTool === "brush" )
+         else if ( data.maskTool === "brush" || data.maskTool === "eraser" )
             self._setCursorId( StdCursor_Cross );
          else
          {
@@ -1767,10 +1868,12 @@ function PreviewFrame( parent )
          self.cursor    = new Cursor( StdCursor_OpenHand );
          return;
       }
-      if ( data.maskTool === "brush" )
+      if ( data.maskTool === "brush" || data.maskTool === "eraser" )
       {
-         // Rebuild overlay once on release, not on every move.
+         // Rebuild the actual overlay bitmap once on release, then
+         // clear the real-time trail.
          rebuildMaskOverlay();
+         self._brushTrail = [];
       }
       // If the user just clicked (no real drag) on an empty area with
       // the geometric tools, discard the tiny placeholder shape so a
@@ -2098,18 +2201,22 @@ function CombinerDialog()
    this.maskToolCombo = new ComboBox( this );
    this.maskToolCombo.editEnabled = false;
    this.maskToolCombo.addItem( "Off / Pan view" );
-   this.maskToolCombo.addItem( "Ellipse (drag to draw)" );
+   this.maskToolCombo.addItem( "Ellipse (drag to draw oriented)" );
    this.maskToolCombo.addItem( "Rectangle (drag to draw)" );
    this.maskToolCombo.addItem( "Brush (drag to paint)" );
+   this.maskToolCombo.addItem( "Eraser (drag to subtract)" );
    this.maskToolCombo.currentItem = 0;
    this.maskToolCombo.toolTip =
-      "Select a drawing tool to paint the mask. The mask reduces the " +
-      "contribution of the stars layer in painted areas, so the gas / " +
-      "nebulosity from the starless shows through more clearly.\n" +
-      "Off / Pan view: classic preview navigation (drag to pan).";
+      "Select a drawing tool. The mask reduces the contribution of the " +
+      "stars layer in painted areas, so gas / nebulosity from the " +
+      "starless shows through more clearly.\n" +
+      "Ellipse: first click + drag = ends of the major axis (auto-rotated).\n" +
+      "Rectangle: drag from one corner to the opposite corner.\n" +
+      "Brush: paint a soft circle along the cursor while dragging.\n" +
+      "Eraser: subtract from the mask (useful to clean up brush mistakes).";
    this.maskToolCombo.onItemSelected = function( idx )
    {
-      var newTool = ["pan","ellipse","rect","brush"][ idx ];
+      var newTool = ["pan","ellipse","rect","brush","eraser"][ idx ];
       // When switching AWAY from an editable-shape tool, auto-commit
       // any active shape so the user doesn't lose work.
       if ( newTool !== data.maskTool && data.activeShape != null )

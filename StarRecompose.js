@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.48"
+#define VERSION       "1.1.49"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1410,16 +1410,34 @@ function getRotateCursor()
 
 function buildRotateCursorBitmap()
 {
-   // v1.1.48: bumped from 24x24 to 26x26 (~10% larger) and inverted
-   // the palette - the main stroke is now WHITE (more visible on dark
-   // sky) wrapped in a 1-px BLACK halo (which keeps it readable on
-   // bright nebula cores).
+   // v1.1.49: try fully opaque white (alpha 0xff). PJSR's color bridge
+   // historically sanitises packed values > 2^31 to 0 for some draw
+   // calls, but Bitmap.setPixel may handle it correctly. Detect at
+   // runtime: write 0xffffffff to a probe pixel and read it back. If
+   // the read value matches (or is at least non-zero with high RGB),
+   // use full alpha; otherwise fall back to the safe alpha 0x7f.
    var size = 26;
    var bmp  = makeAlphaBitmap( size, size );
    var cx   = 13, cy = 13;
    var r    = 9;
-   var wht  = 0x7fffffff;      // main stroke (positive int32)
-   var blk  = 0x7f000000;      // halo for contrast
+
+   var supportsFullAlpha = false;
+   try {
+      bmp.setPixel( 0, 0, 0xffffffff );
+      var probe = bmp.pixel( 0, 0 );
+      // Probe value should be 0xffffffff (uint) or -1 (signed int32
+      // representation of the same bits). Either means write succeeded
+      // verbatim. A sanitised value of 0 means we got transparent
+      // black -> full alpha not supported on this build.
+      if ( probe === 0xffffffff || probe === -1 ||
+           (probe != null && probe !== 0 && probe !== 0xff000000) )
+         supportsFullAlpha = true;
+      // Reset the probe pixel so it doesn't leave a stray dot.
+      bmp.setPixel( 0, 0, 0 );
+   } catch ( e ) { /* not supported -> stay with safe alpha */ }
+
+   var wht  = supportsFullAlpha ? 0xffffffff : 0x7fffffff;
+   var blk  = supportsFullAlpha ? 0xff000000 : 0x7f000000;
 
    function stamp( x, y )
    {
@@ -1588,22 +1606,28 @@ function stampShapeOutlinesOnBitmap( bmp )
       // Inner "core" contour (dashed): visual guide for the solid
       // mask=1 zone inside an ellipse with feather > 0.
       //
-      // v1.1.47: replaced the scaled-down ellipse (rx*gc, ry*gc) with
-      // a true OFFSET CURVE - the inner outline now sits at a UNIFORM
-      // pixel distance from the outer perimeter, instead of a smaller
-      // gap on the minor axis and a larger gap on the major axis.
-      // The inset distance maps the gradientCenter slider to pixels
-      // as (1 - gc) * min(rx, ry), capped so the inner curve never
-      // collapses past the centre.
+      // The inset is now a TRUE offset curve (constant perpendicular
+      // distance from the outer perimeter). It can fold on itself when
+      // the inset exceeds the local radius of curvature; for an
+      // ellipse with semi-axes a >= b the smallest radius of curvature
+      // is b^2/a at the end of the major axis. We cap the inset below
+      // that limit so the curve never self-intersects.
       var gcShape = (s.gradientCenter != null)
                   ? s.gradientCenter : data.maskGradientCtr;
       if ( s.type === "ellipse" && gcShape < 0.99 )
       {
-         var minR = Math.min( s.rx, s.ry );
-         var insetPx = Math.min( minR - 2, (1 - gcShape) * minR );
+         var minR     = Math.min( s.rx, s.ry );
+         var maxR     = Math.max( s.rx, s.ry );
+         var minCurv  = (minR * minR) / maxR;     // tightest radius of curvature
+         var sliderInset = (1 - gcShape) * minR;
+         var insetPx  = Math.min(
+            sliderInset,         // what the user asked for
+            minR - 2,            // never collapse past the centre
+            minCurv - 1          // never fold the offset curve
+         );
          if ( insetPx >= 2 )
          {
-            var cppts = ellipseOffsetCurve( s, insetPx, 64 );
+            var cppts = ellipseOffsetCurve( s, insetPx, 96 );
             bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
             bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
          }

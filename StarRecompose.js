@@ -69,12 +69,12 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.38"
+#define VERSION       "1.1.39"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
 // for release once the cause is identified.
-#define DEBUG_PREVIEW 1
+#define DEBUG_PREVIEW 0
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -168,6 +168,13 @@ function CombinerData()
    //   {type:"ellipse"|"rect", cx, cy, rx, ry, angle, feather}
    this.activeShape      = null;
 
+   // List of committed shapes. Each shape is the same object schema as
+   // activeShape. When the user commits a shape (via Apply Edits, click
+   // outside, or ENTER), it is appended here AND baked into the raster
+   // mask. Edit / Delete operations remove the shape from this list and
+   // rebuild the raster mask from scratch using whatever remains.
+   this.shapes           = [];
+
    // Persist current values into the script instance (the New Instance
    // triangle at the bottom-left drags a snapshot to the workspace).
    this.save = function()
@@ -179,6 +186,13 @@ function CombinerData()
       Parameters.set( "outputId",          this.outputId );
       Parameters.set( "keepStars",        this.keepStars );
       Parameters.set( "starsOutputId",    this.starsOutputId );
+      // Committed mask shapes - serialise as JSON. We persist enough
+      // to fully reconstruct each shape (type + geometry + feather +
+      // gradient center). Cache-pixel coords are saved as-is; on load
+      // the user will need to be working with cache of similar size.
+      try {
+         Parameters.set( "shapesJson", JSON.stringify( this.shapes ) );
+      } catch ( e ) {}
    };
 
    // Restore values when the dialog is launched from a saved instance.
@@ -200,6 +214,14 @@ function CombinerData()
          this.keepStars = Parameters.getBoolean( "keepStars" );
       if ( Parameters.has( "starsOutputId" ) )
          this.starsOutputId = Parameters.getString( "starsOutputId" );
+      if ( Parameters.has( "shapesJson" ) )
+      {
+         try {
+            var arr = JSON.parse( Parameters.getString( "shapesJson" ) );
+            if ( arr && arr.length != null )
+               this.shapes = arr;
+         } catch ( e ) {}
+      }
    };
 }
 
@@ -662,7 +684,9 @@ function ensureMaskWindow()
    return w;
 }
 
-// Zero the mask out and clear the cached overlay bitmap.
+// Zero the mask out, drop the committed shapes list, and clear the
+// cached overlay bitmap. Called by the "Clear Mask" button and the
+// DEL keyboard shortcut.
 function clearMask()
 {
    var w = ImageWindow.windowById( ID_MASK );
@@ -676,6 +700,8 @@ function clearMask()
       pm.executeOn( w.mainView, false );
    }
    data.maskOverlayBitmap = null;
+   data.shapes = [];
+   refreshShapesCombo();
 }
 
 // Ensure the PENDING mask window exists at the preview cache size.
@@ -1446,12 +1472,12 @@ function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
 // strength) that evaluates to the feathered mask of the active shape,
 // 1 deep inside, falling off to 0 over `feather` pixels outside.
 // Returns null when there is no active shape or the cache is missing.
-function activeShapeMaskExpr()
+// Build the PixelMath expression for any shape (ellipse or rect).
+// Returns null if the shape is invalid. The expression evaluates to
+// a value in [0, 1] giving the mask intensity at each pixel.
+function shapeExprFor( s )
 {
-   if ( data.activeShape == null ) return null;
-   if ( data.starlessSmall == null ) return null;
-
-   var s  = data.activeShape;
+   if ( s == null ) return null;
    var gc = (s.gradientCenter != null) ? s.gradientCenter
                                        : data.maskGradientCtr;
 
@@ -1477,15 +1503,75 @@ function activeShapeMaskExpr()
    return null;
 }
 
-// Bake the active shape into the persistent raster mask and clear it.
-// Called from "Apply Edits" button and when the user switches tools.
+// Backwards-compatible thin wrapper for the in-progress active shape.
+function activeShapeMaskExpr()
+{
+   if ( data.activeShape == null ) return null;
+   if ( data.starlessSmall == null ) return null;
+   return shapeExprFor( data.activeShape );
+}
+
+// Clear the raster mask and bake every committed shape from
+// data.shapes back into it. Called after deleting or editing a shape
+// so the raster mask reflects only the shapes that remain in the list.
+function rebuildMaskFromShapes()
+{
+   if ( data.starlessSmall == null ) return;
+   var w = ensureMaskWindow();
+   if ( w == null ) return;
+
+   // 1. Zero the mask.
+   var pmClear = new PixelMath;
+   pmClear.expression          = "0";
+   pmClear.useSingleExpression = true;
+   pmClear.createNewImage      = false;
+   pmClear.generateOutput      = true;
+   pmClear.truncate            = true;
+   pmClear.truncateLower       = 0.0;
+   pmClear.truncateUpper       = 1.0;
+   pmClear.executeOn( w.mainView, false );
+
+   // 2. Bake each remaining shape with a max-blend into the mask.
+   for ( var i = 0; i < data.shapes.length; ++i )
+   {
+      var expr = shapeExprFor( data.shapes[i] );
+      if ( expr == null ) continue;
+      var pm = new PixelMath;
+      pm.expression          = "max($T," + expr + ")";
+      pm.useSingleExpression = true;
+      pm.createNewImage      = false;
+      pm.generateOutput      = true;
+      pm.truncate            = true;
+      pm.truncateLower       = 0.0;
+      pm.truncateUpper       = 1.0;
+      pm.executeOn( w.mainView, false );
+   }
+}
+
+// Bake the active shape into the persistent raster mask and append
+// it to the committed shapes list (so the user can later edit or
+// delete it). Called from "Apply Edits", click-outside, tool switch,
+// and ENTER shortcut.
 function commitActiveShape()
 {
    if ( data.activeShape == null ) return;
-   var value = activeShapeMaskExpr();
+   var shapeCopy = {
+      type:           data.activeShape.type,
+      cx:             data.activeShape.cx,
+      cy:             data.activeShape.cy,
+      rx:             data.activeShape.rx,
+      ry:             data.activeShape.ry,
+      angle:          data.activeShape.angle,
+      feather:        data.activeShape.feather,
+      gradientCenter: data.activeShape.gradientCenter
+   };
+   var value = shapeExprFor( shapeCopy );
    data.activeShape = null;       // clear FIRST so it isn't included twice
    var w = ensureMaskWindow();
    if ( w == null || value == null ) return;
+
+   // Append to committed list for the shapes manager UI.
+   data.shapes.push( shapeCopy );
 
    var pm = new PixelMath;
    pm.expression          = "max($T," + value + ")";
@@ -1496,6 +1582,8 @@ function commitActiveShape()
    pm.truncateLower       = 0.0;
    pm.truncateUpper       = 1.0;
    pm.executeOn( w.mainView, false );
+
+   refreshShapesCombo();
 }
 
 // Commit ALL pending edits (active shape + pending raster brush
@@ -1569,6 +1657,87 @@ function discardActiveShape()
    data.activeShape = null;
 }
 
+// ===================== Shapes manager =====================
+
+// Repopulate the shapes ComboBox to reflect data.shapes. Heavy: call
+// only when the shape list itself changed (add / remove). Safe to
+// call before the UI is built.
+function refreshShapesCombo()
+{
+   if ( ui == null || ui.shapesCombo == null ) return;
+   var cb = ui.shapesCombo;
+   var keepIdx = cb.currentItem;
+   cb.clear();
+   if ( data.shapes.length === 0 )
+   {
+      cb.addItem( "(no committed shapes)" );
+      cb.enabled = false;
+      updateShapeButtonsState();
+      return;
+   }
+   cb.enabled = true;
+   for ( var i = 0; i < data.shapes.length; ++i )
+   {
+      var s = data.shapes[i];
+      var typeLabel = (s.type === "rect") ? "Rect" : "Ellipse";
+      cb.addItem( "Shape " + (i + 1) + "  (" + typeLabel + ")" );
+   }
+   cb.currentItem = Math.max( 0, Math.min( keepIdx, data.shapes.length - 1 ) );
+   updateShapeButtonsState();
+}
+
+// Cheap: only toggles the Edit / Delete enabled state based on the
+// current activeShape and shapes list. Safe to call from frequent
+// places like updateCommitButton.
+function updateShapeButtonsState()
+{
+   if ( ui == null ) return;
+   var hasShapes = data.shapes.length > 0;
+   var canEdit   = hasShapes && (data.activeShape == null);
+   if ( ui.shapeEditBtn   ) ui.shapeEditBtn.enabled   = canEdit;
+   if ( ui.shapeDeleteBtn ) ui.shapeDeleteBtn.enabled = hasShapes;
+}
+
+// Remove shape at index from data.shapes, rebuild the raster mask
+// from the remaining shapes, and load the removed shape as the
+// activeShape (so the user sees its handles and can adjust it).
+function editShapeAt( idx )
+{
+   if ( idx < 0 || idx >= data.shapes.length ) return;
+   if ( data.activeShape != null ) return;       // Apply Edits first
+   var s = data.shapes[ idx ];
+   data.shapes.splice( idx, 1 );
+   rebuildMaskFromShapes();
+   rebuildMaskOverlay();
+   data.activeShape = {
+      type:           s.type,
+      cx:             s.cx,
+      cy:             s.cy,
+      rx:             s.rx,
+      ry:             s.ry,
+      angle:          s.angle,
+      feather:        s.feather,
+      gradientCenter: s.gradientCenter
+   };
+   // Match the mask tool to the shape's type so the outline / handles
+   // are drawn (onPaint only draws them for "ellipse" or "rect").
+   data.maskTool = s.type;
+   refreshShapesCombo();
+   if ( ui && ui.maskToolCombo )
+      ui.maskToolCombo.currentItem = (s.type === "rect") ? 2 : 1;
+}
+
+// Remove shape at index and rebuild the raster mask without it.
+// activeShape is left untouched.
+function deleteShapeAt( idx )
+{
+   if ( idx < 0 || idx >= data.shapes.length ) return;
+   data.shapes.splice( idx, 1 );
+   rebuildMaskFromShapes();
+   rebuildMaskOverlay();
+   refreshShapesCombo();
+}
+
 // Visual accent colors. NOTE on alpha: in PJSR, ARGB color literals
 // with alpha 0x80..0xff are > 2^31 and JavaScript treats them as
 // signed-int32 negatives, which PJSR's color bridge can sanitize to
@@ -1610,6 +1779,9 @@ function updateCommitButton()
       ui.maskCommitBtn.text    = "(no edits)";
       ui.maskCommitBtn.enabled = false;
    }
+   // Edit button is gated on activeShape == null, so it has to track
+   // commit / discard transitions too. Cheap (just toggles flags).
+   updateShapeButtonsState();
 }
 
 // Show or hide the three mask parameter rows based on the current tool.
@@ -3271,6 +3443,71 @@ function CombinerDialog()
    maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
 
+   // ---- Committed shapes manager: list + Edit + Delete ----
+   var shapesLabel = new Label( this );
+   shapesLabel.text          = "Shapes:";
+   shapesLabel.setFixedWidth( labelWidth );
+   shapesLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+
+   this.shapesCombo = new ComboBox( this );
+   this.shapesCombo.editEnabled = false;
+   this.shapesCombo.addItem( "(no committed shapes)" );
+   this.shapesCombo.enabled = false;
+   this.shapesCombo.toolTip =
+      "List of mask shapes you have committed so far. Select one and " +
+      "use Edit (load the shape back as the editable active shape) or " +
+      "Delete (remove the shape and rebuild the mask without it).";
+
+   this.shapeEditBtn = new PushButton( this );
+   this.shapeEditBtn.text    = "Edit";
+   this.shapeEditBtn.enabled = false;
+   this.shapeEditBtn.toolTip =
+      "Pull the selected shape out of the committed mask and load it " +
+      "as the active editable shape (with handles). Commit it again " +
+      "with Apply Edits, ENTER, or clicking outside.";
+   this.shapeEditBtn.onClick = function()
+   {
+      if ( data.activeShape != null )
+      {
+         // Auto-commit the in-progress shape so the user doesn't lose work.
+         commitActiveShape();
+         rebuildMaskOverlay();
+      }
+      var idx = self.shapesCombo.currentItem;
+      editShapeAt( idx );
+      rebuildMaskOverlay();
+      updateMaskRowsVisibility();
+      updateCommitButton();
+      if ( self.previewFrame )
+      {
+         self.previewFrame.refreshCursor();
+         self.previewFrame.repaint();
+      }
+      scheduleUpdate();
+   };
+
+   this.shapeDeleteBtn = new PushButton( this );
+   this.shapeDeleteBtn.text    = "Delete";
+   this.shapeDeleteBtn.enabled = false;
+   this.shapeDeleteBtn.toolTip =
+      "Remove the selected shape from the committed mask and rebuild " +
+      "the raster mask using only the shapes that remain. Does not " +
+      "affect the active editable shape.";
+   this.shapeDeleteBtn.onClick = function()
+   {
+      var idx = self.shapesCombo.currentItem;
+      deleteShapeAt( idx );
+      if ( self.previewFrame ) self.previewFrame.repaint();
+      scheduleUpdate();
+   };
+
+   var shapesRow = new HorizontalSizer;
+   shapesRow.spacing = 4;
+   shapesRow.add( shapesLabel );
+   shapesRow.add( this.shapesCombo, 100 );
+   shapesRow.add( this.shapeEditBtn );
+   shapesRow.add( this.shapeDeleteBtn );
+
    // Quick "Compare" button: toggle Edit <-> Result so the user can
    // flip between with/without mask effect with a single click.
    this.compareBtn = new PushButton( this );
@@ -3532,6 +3769,7 @@ function CombinerDialog()
    leftPanel.add( makeSection( 3, "Mask (optional)",
                   "limit the stretch to a region" ) );
    leftPanel.add( maskToolRow );
+   leftPanel.add( shapesRow );
    leftPanel.add( viewModeRow );
    leftPanel.add( this.maskStrengthNC );
    leftPanel.add( this.maskFeatherNC );
@@ -3627,6 +3865,7 @@ function CombinerDialog()
    // Apply initial visibility / button state to match the default tool.
    updateMaskRowsVisibility();
    updateCommitButton();
+   refreshShapesCombo();
 
    this.adjustToContents();
    // Two-column layout: wider than tall so the preview gets room.

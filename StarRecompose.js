@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.33"
+#define VERSION       "1.1.34"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -3285,18 +3285,23 @@ function CombinerDialog()
    }
 
    // Helper to create a bold section header label (numbered).
+   // wordWrapping prevents the hint text from overlapping siblings when
+   // the dialog is shrunk horizontally; the label simply grows taller.
    var self2 = this;
    function makeSection( num, title, hint )
    {
       var hdr = new Label( self2 );
       hdr.text = num + ") " + title + (hint ? "  -  " + hint : "");
-      hdr.styleSheet = "QLabel { font-weight: bold; color: #5aa6ff; " +
+      hdr.wordWrapping = true;
+      hdr.useRichText = false;
+      hdr.styleSheet = "QLabel { font-weight: bold; color: #14366b; " +
                        "padding-top: 6px; }";
       return hdr;
    }
 
    var leftPanel = new VerticalSizer;
    leftPanel.spacing = 4;
+
 
    leftPanel.add( makeSection( 1, "Images",
                   "pick starless and stars-only views" ) );

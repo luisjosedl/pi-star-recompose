@@ -52,7 +52,7 @@
  * preview stays sharp when you enlarge the window.
  ******************************************************************************/
 
-#feature-id    Astro DL Suite > Star Recompose Pro
+#feature-id    AstroDL Suite > Star Recompose Pro
 #feature-info  Recompose a stretched starless image with a linear stars-only image using a per-channel rational stretch. Live embedded preview, vector mask editor.
 
 #include <pjsr/Sizer.jsh>
@@ -65,11 +65,11 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/KeyCodes.jsh>
 
-#define BRAND         "Astro DL"
-#define BRAND_SUITE   "Astro DL Suite"
+#define BRAND         "AstroDL"
+#define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.28"
+#define VERSION       "1.1.29"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog

@@ -12,28 +12,51 @@
 -->
 <xri version="1.0">
    <description>
-      <p><b>AstroDL</b> &mdash; astrophotography tool suite for PixInsight
-      by luisjosedl.</p>
-      <p>Currently includes <b>Star Recompose</b>: recomposes a stretched
-      starless image with a linear stars-only image using an
-      ArcsinhStretch-based engine with live embedded preview, mouse-wheel
-      zoom and pan. MIT License.</p>
+      <p><b>AstroDL Suite</b> &mdash; astrophotography tools for PixInsight
+      by Luis Jose DL.</p>
+      <p>Currently includes <b>Star Recompose Pro</b>: a complete tool
+      for recomposing starless and stars-only images with live preview
+      and a vector mask editor.</p>
       <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.1.31.tar.gz"
+      <package fileName="pkg/AstroDL-StarRecompose-1.1.32.tar.gz"
                sha1="0000000000000000000000000000000000000000"
                type="script"
                releaseDate="20260516">
-         <title>AstroDL - Star Recompose</title>
+         <title>Star Recompose Pro</title>
          <description>
-            <p>Star Recompose v1.1 &mdash; combines a stretched starless
-            image with a linear stars-only image using PixInsight's native
-            ArcsinhStretch (Lupton 1999) plus a saturation hat-curve and
-            an optional SCNR Green step.</p>
-            <p>Live embedded preview with mouse-wheel zoom and click-drag
-            pan. Optional second output for the stretched stars layer.
-            MIT License.</p>
+            <p><b>Star Recompose Pro</b> recomposes a stretched starless
+            image with a linear stars-only image and produces a single
+            combined output, while you preview the result in real time.</p>
+            <p><b>Features</b></p>
+            <ul>
+               <li>Live embedded preview with mouse-wheel zoom and
+                   click-drag pan</li>
+               <li>Loads either layer first and previews it immediately;
+                   composites automatically once both are selected</li>
+               <li>Single intensity slider for the stars stretch plus an
+                   independent color-saturation boost</li>
+               <li>Optional green and / or magenta color-cast cleanup</li>
+               <li>Vector mask editor: draw oriented ellipses or
+                   rectangles, then move, resize, and rotate them with
+                   handles before applying</li>
+               <li>Configurable mask strength, soft-edge feather, and
+                   gradient-core radius</li>
+               <li>Three preview modes: image only, image with mask
+                   effect, or mask alone in black &amp; white</li>
+               <li>One-click Compare button to flip between with /
+                   without the mask applied</li>
+               <li>Invert mode to keep stars only inside the painted
+                   region</li>
+               <li>Keyboard shortcuts (ENTER, ESC, DELETE, M) for the
+                   most common actions</li>
+               <li>Optional second output: the stretched stars layer on
+                   its own</li>
+               <li>Save current settings as a process icon for one-click
+                   reuse on future images</li>
+            </ul>
+            <p>MIT License. Free for personal and commercial use.</p>
          </description>
       </package>
    </platform>

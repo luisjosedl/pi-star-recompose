@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.40"
+#define VERSION       "1.1.41"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -998,12 +998,21 @@ function eraseCircleFromMasks( cx, cy, radius, feather )
    }
 }
 
-// Rebuild the cached visualization bitmap of the mask. Uses PixelMath
-// to build a red-tinted RGB image (R = mask, G = B = 0), then renders
-// to a Bitmap. The bitmap is later drawn with CompositionOp_Plus so
-// black areas (mask = 0) are visually transparent.
+// Used to rebuild a red-tinted Bitmap to overlay on top of the
+// preview, but the per-frame compositionOperator API turned out to be
+// unreliable in this PJSR build (see paint code note). Since v1.1.41
+// the function is a no-op kept for backwards-compatibility with the
+// many callers - they'll be cleaned up over time. The same "where is
+// my mask?" info is now conveyed by drawing thin outlines of every
+// committed shape directly on the canvas in onPaint.
 function rebuildMaskOverlay()
 {
+   data.maskOverlayBitmap = null;
+   return;
+   // The old PixelMath + render + drawScaledBitmap code below is
+   // preserved as dead code in case we want to revive the overlay
+   // once we have a portable compositing path.
+   /* eslint-disable no-unreachable */
    closeWindowById( ID_OVERLAY );
    var maskW = ImageWindow.windowById( ID_MASK );
    if ( maskW.isNull )
@@ -2374,43 +2383,17 @@ function PreviewFrame( parent )
          // Base preview
          g.drawScaledBitmap( destRect, self.bitmap );
 
-         // Mask overlays (red = committed, pink/cyan = pending) are
-         // drawn for both "edit" and "result" view modes. "mask" mode
-         // already shows the mask as the preview itself, so we skip
-         // overlays there to avoid double-rendering.
-         //
-         // IMPORTANT: We use compositionOperator = 11 (Plus / Additive),
-         // NOT Multiply. The overlay bitmap is RGB with R=0.5*mask,
-         // G=B=0; Multiply would zero out the green and blue channels
-         // of the preview everywhere, leaving an all-red image. Plus
-         // ADDS the overlay channels, so mask=0 areas are unchanged
-         // and mask>0 areas get a red tint on top of the preview.
-         if ( data.viewMode === "edit" || data.viewMode === "result" )
-         {
-            if ( DEBUG_PREVIEW &&
-                 (data.maskOverlayBitmap != null
-               || data.maskPendingOverlayBitmap != null) )
-            {
-               console.writeln(
-                  "[paint] overlays  committed=" +
-                  (data.maskOverlayBitmap != null) +
-                  "  pending=" +
-                  (data.maskPendingOverlayBitmap != null) +
-                  "  compOp=Plus(11)" );
-            }
-            try { g.compositionOperator = 11; } catch ( ce ) {}
-            if ( data.maskOverlayBitmap != null )
-            {
-               try { g.drawScaledBitmap( destRect, data.maskOverlayBitmap ); }
-               catch ( ce ) {}
-            }
-            if ( data.maskPendingOverlayBitmap != null )
-            {
-               try { g.drawScaledBitmap( destRect, data.maskPendingOverlayBitmap ); }
-               catch ( ce ) {}
-            }
-            try { g.compositionOperator = 0; } catch ( ce ) {}
-         }
+         // NOTE: The old red-tint overlay (drawScaledBitmap with a
+         // compositionOperator) was removed in v1.1.41. PJSR's
+         // composition-operator numeric enum is unreliable in this
+         // build: Multiply (12) zeroed the G/B channels of the preview
+         // ("all-red" bug), and Plus (per Qt's enum, 11) actually
+         // behaved like Source and turned the whole preview opaque
+         // black. Instead we draw thin outlines of each committed
+         // shape directly via the same gfx fillRect helpers used for
+         // the active shape (see below). The user can still preview
+         // the actual masked output with the View=Result mode or the
+         // Compare button.
 
          // Active shape (editable): outline + handles. Drawn on top of
          // any overlay so the user can always see and grab it. Only
@@ -2532,6 +2515,56 @@ function PreviewFrame( parent )
                {
                   gfxFillRectHandle( g, hx, hy, 5, handleFill, handleOutline );
                }
+            }
+         }
+
+         // Thin outlines for each COMMITTED shape (no handles). Lets the
+         // user see where their committed shapes sit on top of the
+         // preview without needing a separate red tint overlay (which
+         // had unreliable compositing in this PJSR build - see note
+         // above). Skipped in "mask" view because the mask itself is
+         // already the preview content.
+         if ( data.shapes.length > 0 && data.viewMode !== "mask"
+           && data.maskTool !== "pan" )
+         {
+            var committedShadow = argb( 0x7f, 0, 0, 0 );      // black
+            var committedColor  = data.maskInvert
+                                ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
+                                : argb( 0x7f, 0xff, 0x80, 0x00 );  // orange
+            for ( var sIdx = 0; sIdx < data.shapes.length; ++sIdx )
+            {
+               var cs = data.shapes[ sIdx ];
+               var cco = Math.cos( cs.angle );
+               var csi = Math.sin( cs.angle );
+               var cpts = [];
+               if ( cs.type === "ellipse" )
+               {
+                  for ( var ci2 = 0; ci2 < 48; ++ci2 )
+                  {
+                     var cth2 = (ci2 / 48) * 2 * Math.PI;
+                     var clx2 = cs.rx * Math.cos( cth2 );
+                     var cly2 = cs.ry * Math.sin( cth2 );
+                     var cwx2 = cs.cx + clx2 * cco - cly2 * csi;
+                     var cwy2 = cs.cy + clx2 * csi + cly2 * cco;
+                     var ccp2 = self._imageRectToCanvas( cwx2, cwy2, cwx2, cwy2 );
+                     cpts.push( new Point( ccp2.x0, ccp2.y0 ) );
+                  }
+               }
+               else // rect
+               {
+                  var rlocal = [ [-cs.rx, -cs.ry], [cs.rx, -cs.ry],
+                                 [ cs.rx,  cs.ry], [-cs.rx,  cs.ry] ];
+                  for ( var rk = 0; rk < 4; ++rk )
+                  {
+                     var rlx = rlocal[rk][0], rly = rlocal[rk][1];
+                     var rwx = cs.cx + rlx * cco - rly * csi;
+                     var rwy = cs.cy + rlx * csi + rly * cco;
+                     var rcp = self._imageRectToCanvas( rwx, rwy, rwx, rwy );
+                     cpts.push( new Point( rcp.x0, rcp.y0 ) );
+                  }
+               }
+               gfxStrokeClosedPath( g, cpts, committedShadow, 2, false );
+               gfxStrokeClosedPath( g, cpts, committedColor,  1, false );
             }
          }
 

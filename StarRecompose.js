@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.37"
+#define VERSION       "1.1.38"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -2206,23 +2206,27 @@ function PreviewFrame( parent )
          // drawn for both "edit" and "result" view modes. "mask" mode
          // already shows the mask as the preview itself, so we skip
          // overlays there to avoid double-rendering.
+         //
+         // IMPORTANT: We use compositionOperator = 11 (Plus / Additive),
+         // NOT Multiply. The overlay bitmap is RGB with R=0.5*mask,
+         // G=B=0; Multiply would zero out the green and blue channels
+         // of the preview everywhere, leaving an all-red image. Plus
+         // ADDS the overlay channels, so mask=0 areas are unchanged
+         // and mask>0 areas get a red tint on top of the preview.
          if ( data.viewMode === "edit" || data.viewMode === "result" )
          {
             if ( DEBUG_PREVIEW &&
                  (data.maskOverlayBitmap != null
                || data.maskPendingOverlayBitmap != null) )
             {
-               // Logs once per repaint when overlays exist - useful
-               // to confirm whether the Multiply blend is what is
-               // turning the preview black.
                console.writeln(
                   "[paint] overlays  committed=" +
                   (data.maskOverlayBitmap != null) +
                   "  pending=" +
                   (data.maskPendingOverlayBitmap != null) +
-                  "  compOp=Multiply(12)" );
+                  "  compOp=Plus(11)" );
             }
-            try { g.compositionOperator = 12; } catch ( ce ) {}
+            try { g.compositionOperator = 11; } catch ( ce ) {}
             if ( data.maskOverlayBitmap != null )
             {
                try { g.drawScaledBitmap( destRect, data.maskOverlayBitmap ); }
@@ -2289,13 +2293,14 @@ function PreviewFrame( parent )
             // ARGB color literals with alpha >= 0x80 become > 2^31 in
             // JavaScript and PJSR's Brush color setter sanitizes them
             // to opaque black. Stay in the positive int32 range with
-            // alpha 0x7f - the outline is still very visible on top of
-            // the preview (and we draw the colored stroke over a wider
-            // black shadow stroke for contrast against bright nebulae).
+            // alpha 0x7f. Yellow + black shadow gives strong contrast
+            // on both bright nebulae and dark sky backgrounds (red
+            // tends to blend with red nebulosity; black alone blends
+            // with dark space).
             var shadowColor = argb( 0x7f, 0, 0, 0 );           // black
             var mainColor   = data.maskInvert
-                            ? argb( 0x7f, 0x00, 0xcc, 0xff )   // cyan
-                            : argb( 0x7f, 0xff, 0x00, 0x00 );  // RED
+                            ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
+                            : argb( 0x7f, 0xff, 0xff, 0x00 );  // YELLOW
 
             // Main outline: shadow + colored stroke.
             gfxStrokeClosedPath( g, pts, shadowColor, 4, false );
@@ -2327,11 +2332,11 @@ function PreviewFrame( parent )
             // comment above) so the Brush honors the requested color.
             var handles = getActiveShapeHandles();
             var handleFill    = data.maskInvert
-                              ? argb( 0x7f, 0x00, 0xcc, 0xff )
-                              : argb( 0x7f, 0xff, 0x00, 0x00 );
-            var handleOutline = argb( 0x7f, 0xff, 0xff, 0xff );  // white
-            var rotFill       = argb( 0x7f, 0x22, 0xaa, 0x22 );  // green
-            var rotOutline    = argb( 0x7f, 0xff, 0xff, 0xff );
+                              ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
+                              : argb( 0x7f, 0xff, 0xff, 0x00 );  // yellow
+            var handleOutline = argb( 0x7f, 0x00, 0x00, 0x00 );  // black border
+            var rotFill       = argb( 0x7f, 0x00, 0xff, 0x00 );  // green
+            var rotOutline    = argb( 0x7f, 0x00, 0x00, 0x00 );  // black border
 
             for ( var h = 0; h < handles.length; ++h )
             {
@@ -2587,9 +2592,16 @@ function PreviewFrame( parent )
 
       if ( data.activeShape != null )
       {
-         // Click missed the existing shape - keep it. To start a new
-         // one the user must commit it (Apply Edits) or discard it
-         // (ESC) first.
+         // Click missed the existing shape -> commit it into the
+         // persistent mask and hide the editor. The user's mask
+         // remains applied (visible as the red tint overlay) but the
+         // handles/outline disappear so the preview is uncluttered.
+         // A subsequent click will start a NEW shape.
+         commitActiveShape();
+         rebuildMaskOverlay();
+         updateCommitButton();
+         scheduleUpdate();
+         self.repaint();
          return;
       }
 
@@ -3409,10 +3421,13 @@ function CombinerDialog()
    this.previewFrame = new PreviewFrame( this );
 
    // ---- Bottom row ----
+   // No fixed width: this label is on its own row and doesn't need to
+   // align with the column on the left, so let it size to its natural
+   // text width to avoid clipping characters when the system font is
+   // wider than the column's reference label ("Color Boost:").
    var outLabel = new Label( this );
    outLabel.text          = "Output name:";
-   outLabel.setFixedWidth( labelWidth );
-   outLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   outLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
    this.outIdEdit = new Edit( this );
    this.outIdEdit.text = data.outputId;

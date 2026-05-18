@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.30"
+#define VERSION       "1.1.31"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -3039,24 +3039,12 @@ function CombinerDialog()
       if ( self.previewFrame ) self.previewFrame.repaint();
    };
 
-   // "Smooth" button: Gaussian blur of the mask (committed AND pending)
-   // to soften hard brush edges or shape boundaries. Each click adds
-   // more smoothing - run twice for stronger blur.
-   this.maskSmoothBtn = new PushButton( this );
-   this.maskSmoothBtn.text    = "Smooth";
-   this.maskSmoothBtn.toolTip =
-      "Apply a Gaussian blur (0.5% of image width) to the mask to " +
-      "soften hard brush edges or sharp shape boundaries. Useful after " +
-      "painting freehand strokes. Click again for stronger smoothing.";
-   this.maskSmoothBtn.onClick = function()
-   {
-      smoothMaskWindows( 0.5 );
-      rebuildMaskOverlay();
-      rebuildPendingOverlay();
-      updateCommitButton();
-      if ( self.previewFrame ) self.previewFrame.repaint();
-      scheduleUpdate();
-   };
+   // Smooth button removed in v1.1.31: it only applies to brush
+   // strokes, and the brush tool is currently disabled in the UI.
+   // It also rendered as an orphaned floating button at the dialog's
+   // top-left because no sizer was holding it after we commented out
+   // viewModeRow.add(this.maskSmoothBtn). The internal smoothMaskWindows
+   // function is kept for future re-enablement.
 
    // A second row for the view-mode selector. Kept separate from the
    // mask tool row so the tool row stays compact.
@@ -3069,7 +3057,6 @@ function CombinerDialog()
    viewModeRow.add( viewModeLabelFixed );
    viewModeRow.add( this.viewModeCombo, 100 );
    viewModeRow.add( this.compareBtn );
-   // viewModeRow.add( this.maskSmoothBtn );  // Hidden: brush is disabled.
 
    // Row 2: Mask Strength slider
    this.maskStrengthNC = new NumericControl( this );
@@ -3236,23 +3223,49 @@ function CombinerDialog()
       "engine. MIT License.";
 
    // ---- Layout ----
+   // Two-column layout: compact control panel on the left, big preview
+   // frame on the right. Bottom row (Output name + Apply + Close) and
+   // credit line span the full width below.
+   //
+   // To make the left panel compact, slider widths are reduced so the
+   // panel doesn't dominate the dialog (the preview is what the user
+   // actually looks at while working).
+   var compactSliderW = 200;
+   var compactCtrls = [
+      this.stretchNC, this.boostNC,
+      this.maskStrengthNC, this.maskFeatherNC, this.gradientCtrNC
+   ];
+   for ( var ci = 0; ci < compactCtrls.length; ++ci )
+   {
+      var nc = compactCtrls[ ci ];
+      if ( nc && nc.slider ) nc.slider.scaledMinWidth = compactSliderW;
+      if ( nc && nc.edit ) nc.edit.minWidth = 60;
+   }
+
+   var leftPanel = new VerticalSizer;
+   leftPanel.spacing = 6;
+   leftPanel.add( slRow );
+   leftPanel.add( stRow );
+   leftPanel.add( this.stretchNC );
+   leftPanel.add( this.boostNC );
+   leftPanel.add( scnrRow );
+   leftPanel.add( keepRow );
+   leftPanel.add( maskToolRow );
+   leftPanel.add( viewModeRow );
+   leftPanel.add( this.maskStrengthNC );
+   leftPanel.add( this.maskFeatherNC );
+   leftPanel.add( this.gradientCtrNC );
+   leftPanel.addStretch();      // push controls to the top
+
+   var mainRow = new HorizontalSizer;
+   mainRow.spacing = 8;
+   mainRow.add( leftPanel );
+   mainRow.add( this.previewFrame, 100 );    // preview takes the rest
+
    this.sizer = new VerticalSizer;
    this.sizer.margin  = 8;
    this.sizer.spacing = 6;
-   this.sizer.add( slRow );
-   this.sizer.add( stRow );
-   this.sizer.add( this.stretchNC );
-   // this.sizer.add( this.blackNC );    // removed in v1.1.26
-   this.sizer.add( this.boostNC );
-   this.sizer.add( scnrRow );
-   this.sizer.add( keepRow );
-   this.sizer.add( maskToolRow );
-   this.sizer.add( viewModeRow );
-   this.sizer.add( this.maskStrengthNC );
-   this.sizer.add( this.maskFeatherNC );
-   this.sizer.add( this.gradientCtrNC );
-   // this.sizer.add( this.brushRadiusNC );  // Hidden: brush is disabled.
-   this.sizer.add( this.previewFrame, 100 );
+   this.sizer.add( mainRow, 100 );           // main row stretches vertically
    this.sizer.add( btmRow );
    this.sizer.add( this.creditLabel );
 
@@ -3330,7 +3343,8 @@ function CombinerDialog()
    updateCommitButton();
 
    this.adjustToContents();
-   this.setMinSize( 680, 900 );
+   // Two-column layout: wider than tall so the preview gets room.
+   this.setMinSize( 1100, 700 );
 
    // ---- Preselect by name ----
    (function preselect()

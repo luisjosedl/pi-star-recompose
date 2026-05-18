@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.50"
+#define VERSION       "1.1.51"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1410,42 +1410,62 @@ function getRotateCursor()
 
 function buildRotateCursorBitmap()
 {
-   // v1.1.49: try fully opaque white (alpha 0xff). PJSR's color bridge
-   // historically sanitises packed values > 2^31 to 0 for some draw
-   // calls, but Bitmap.setPixel may handle it correctly. Detect at
-   // runtime: write 0xffffffff to a probe pixel and read it back. If
-   // the read value matches (or is at least non-zero with high RGB),
-   // use full alpha; otherwise fall back to the safe alpha 0x7f.
+   // v1.1.51: per-pixel write+verify for opaque white. PJSR's colour
+   // bridge sanitises some ARGB literals > 2^31 (treated as negative
+   // int32) to 0 (transparent) when written via setPixel. The previous
+   // single-probe detection (v1.1.49) was too pessimistic on this
+   // build and always fell back to alpha 0x7f, giving the user the
+   // greyish cursor they kept complaining about.
+   //
+   // Now: try writing each pixel with full alpha 0xff first; read it
+   // back; if the read value indicates sanitisation (0 or 0xff000000),
+   // overwrite that single pixel with the safe alpha-0x7f equivalent.
+   // The first sanitisation we see is logged to console so we can
+   // diagnose exactly what setPixel/pixel are doing on this PI build.
    var size = 26;
    var bmp  = makeAlphaBitmap( size, size );
    var cx   = 13, cy = 13;
    var r    = 9;
 
-   var supportsFullAlpha = false;
-   try {
-      bmp.setPixel( 0, 0, 0xffffffff );
-      var probe = bmp.pixel( 0, 0 );
-      // Probe value should be 0xffffffff (uint) or -1 (signed int32
-      // representation of the same bits). Either means write succeeded
-      // verbatim. A sanitised value of 0 means we got transparent
-      // black -> full alpha not supported on this build.
-      if ( probe === 0xffffffff || probe === -1 ||
-           (probe != null && probe !== 0 && probe !== 0xff000000) )
-         supportsFullAlpha = true;
-      // Reset the probe pixel so it doesn't leave a stray dot.
-      bmp.setPixel( 0, 0, 0 );
-   } catch ( e ) { /* not supported -> stay with safe alpha */ }
-
-   var wht  = supportsFullAlpha ? 0xffffffff : 0x7fffffff;
-   var blk  = supportsFullAlpha ? 0xff000000 : 0x7f000000;
+   var __probeLogged = false;
+   function safeSet( x, y, fullColor, safeColor )
+   {
+      if ( x < 0 || y < 0 || x >= bmp.width || y >= bmp.height ) return;
+      try {
+         bmp.setPixel( x, y, fullColor );
+         var got = bmp.pixel( x, y );
+         // 0 = transparent black (sanitised). 0xff000000 = opaque
+         // black (also sanitised). Anything else = write was honoured.
+         var sanitised = (got === 0 || got === 0xff000000);
+         if ( sanitised )
+         {
+            if ( !__probeLogged ) {
+               console.writeln(
+                  "[cursor] PJSR sanitised setPixel(0x" +
+                  fullColor.toString( 16 ) + "); got 0x" +
+                  (got != null ? got.toString( 16 ) : "null") +
+                  ". Falling back to alpha 0x7f for cursor pixels." );
+               __probeLogged = true;
+            }
+            bmp.setPixel( x, y, safeColor );
+         }
+      } catch ( e ) {
+         // bmp.pixel() not available or threw: try the full-alpha
+         // value once (best effort) and move on. If that didn't take
+         // we won't know, but we did try.
+         try { bmp.setPixel( x, y, fullColor ); } catch ( e2 ) {}
+      }
+   }
 
    function stamp( x, y )
    {
-      plotPixel( bmp, x - 1, y    , blk );
-      plotPixel( bmp, x + 1, y    , blk );
-      plotPixel( bmp, x    , y - 1, blk );
-      plotPixel( bmp, x    , y + 1, blk );
-      plotPixel( bmp, x    , y    , wht );
+      // Halo: opaque black with alpha-0x7f fallback.
+      safeSet( x - 1, y    , 0xff000000, 0x7f000000 );
+      safeSet( x + 1, y    , 0xff000000, 0x7f000000 );
+      safeSet( x    , y - 1, 0xff000000, 0x7f000000 );
+      safeSet( x    , y + 1, 0xff000000, 0x7f000000 );
+      // Main stroke: opaque white with alpha-0x7f fallback.
+      safeSet( x    , y    , 0xffffffff, 0x7fffffff );
    }
 
    // 3/4 circle arc: 30 deg to 300 deg (CCW), leaving a 90 deg gap on

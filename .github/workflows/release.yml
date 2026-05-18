@@ -76,3 +76,24 @@ jobs:
           publish_branch: gh-pages
           keep_files: true
           commit_message: 'Release v${{ steps.ver.outputs.version }}'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "v${{ steps.ver.outputs.version }}"
+          body: |
+            Auto-published from tag `v${{ steps.ver.outputs.version }}`.
+
+            **Install / update in PixInsight**
+
+            1. Add repository (first time only): **Resources → Updates → Manage Repositories**, paste `https://luisjosedl.github.io/pi-star-recompose/` and click OK.
+            2. **Resources → Updates → Check for Updates** and accept the proposed install (click *Continue* past the "untrusted repository" warning).
+            3. Restart PixInsight when prompted. The script appears under **Script → AstroDL Suite → Star Recompose Pro**.
+
+            Future versions install automatically on the next *Check for Updates*.
+          files: ${{ env.OUT_PATH }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

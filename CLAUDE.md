@@ -50,16 +50,20 @@ these trailers automatically if they slip through.
   up the new version on the next "Check for Updates" run.
 
 A normal patch release is therefore: edit, bump VERSION + filename,
-commit, `git tag vX.Y.Z`, push branch + tag, **then create a matching
-GitHub Release** so the repository's "Releases" widget stays in sync:
+commit, `git tag vX.Y.Z`, push branch + tag. The GitHub Actions
+workflow then:
 
-```sh
-gh release create vX.Y.Z --title "vX.Y.Z — short title" --notes "..."
-```
+  1. builds the `.tar.gz`,
+  2. rewrites `updates.xri` with the SHA-1 + release date,
+  3. publishes both to `gh-pages`,
+  4. creates a matching GitHub Release (via `softprops/action-gh-release`)
+     with auto-generated "What's Changed" notes from the commits since
+     the previous tag.
 
-(The GitHub Actions workflow auto-builds the `.tar.gz` and publishes
-to `gh-pages` on every tag push, but it does NOT create the
-`gh release`. That's a separate step.)
+So step 4 is automatic - no separate `gh release create` needed. If
+you want a custom release title or body, edit the `Create GitHub
+Release` step in `.github/workflows/release.yml` or amend the
+release manually with `gh release edit vX.Y.Z`.
 
 ## README version badge
 

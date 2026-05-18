@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.51"
+#define VERSION       "1.1.52"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1410,18 +1410,24 @@ function getRotateCursor()
 
 function buildRotateCursorBitmap()
 {
-   // v1.1.51: per-pixel write+verify for opaque white. PJSR's colour
-   // bridge sanitises some ARGB literals > 2^31 (treated as negative
-   // int32) to 0 (transparent) when written via setPixel. The previous
-   // single-probe detection (v1.1.49) was too pessimistic on this
-   // build and always fell back to alpha 0x7f, giving the user the
-   // greyish cursor they kept complaining about.
+   // v1.1.52 fixes two bugs from v1.1.51 that left the cursor looking
+   // greyish/black instead of opaque white:
    //
-   // Now: try writing each pixel with full alpha 0xff first; read it
-   // back; if the read value indicates sanitisation (0 or 0xff000000),
-   // overwrite that single pixel with the safe alpha-0x7f equivalent.
-   // The first sanitisation we see is logged to console so we can
-   // diagnose exactly what setPixel/pixel are doing on this PI build.
+   //   1) Sanitisation check was wrong. The previous code treated a
+   //      read-back value of 0xff000000 as "PJSR sanitised our write"
+   //      and fell back to alpha 0x7f. But 0xff000000 is EXACTLY what
+   //      we wrote (opaque black for the halo). The actual sanitised
+   //      value is 0 (or something other than what we wrote). We now
+   //      compare bit-patterns via `>>> 0` so the signed/unsigned
+   //      int32 representation differences don't matter.
+   //
+   //   2) Halo overwrote adjacent main pixels. stamp() wrote the halo
+   //      AND the main pixel together for each arc sample. When the
+   //      next arc sample lands one pixel over, its halo writes black
+   //      on top of the previous sample's white centre - the cursor
+   //      degenerates into a black line. Fix: two passes. First plot
+   //      every halo pixel for the whole cursor; THEN plot every
+   //      white centre pixel on top.
    var size = 26;
    var bmp  = makeAlphaBitmap( size, size );
    var cx   = 13, cy = 13;
@@ -1434,53 +1440,42 @@ function buildRotateCursorBitmap()
       try {
          bmp.setPixel( x, y, fullColor );
          var got = bmp.pixel( x, y );
-         // 0 = transparent black (sanitised). 0xff000000 = opaque
-         // black (also sanitised). Anything else = write was honoured.
-         var sanitised = (got === 0 || got === 0xff000000);
-         if ( sanitised )
+         // Compare bit-patterns as uint32 so signed/unsigned int32
+         // representations of the same value match.
+         var gotU  = (got       >>> 0);
+         var wantU = (fullColor >>> 0);
+         if ( gotU !== wantU )
          {
             if ( !__probeLogged ) {
                console.writeln(
                   "[cursor] PJSR sanitised setPixel(0x" +
-                  fullColor.toString( 16 ) + "); got 0x" +
-                  (got != null ? got.toString( 16 ) : "null") +
+                  wantU.toString( 16 ) + "); got 0x" +
+                  gotU.toString( 16 ) +
                   ". Falling back to alpha 0x7f for cursor pixels." );
                __probeLogged = true;
             }
             bmp.setPixel( x, y, safeColor );
          }
       } catch ( e ) {
-         // bmp.pixel() not available or threw: try the full-alpha
-         // value once (best effort) and move on. If that didn't take
-         // we won't know, but we did try.
          try { bmp.setPixel( x, y, fullColor ); } catch ( e2 ) {}
       }
    }
 
-   function stamp( x, y )
-   {
-      // Halo: opaque black with alpha-0x7f fallback.
-      safeSet( x - 1, y    , 0xff000000, 0x7f000000 );
-      safeSet( x + 1, y    , 0xff000000, 0x7f000000 );
-      safeSet( x    , y - 1, 0xff000000, 0x7f000000 );
-      safeSet( x    , y + 1, 0xff000000, 0x7f000000 );
-      // Main stroke: opaque white with alpha-0x7f fallback.
-      safeSet( x    , y    , 0xffffffff, 0x7fffffff );
-   }
-
-   // 3/4 circle arc: 30 deg to 300 deg (CCW), leaving a 90 deg gap on
-   // the lower-right where the arrowhead will sit.
+   // Build a list of all (x, y) sample points first, then plot halo
+   // for all of them, then plot main centres on top. That ordering
+   // guarantees the white centres always win over any neighbouring
+   // halo writes.
+   var pts = [];
    for ( var deg = 30; deg <= 300; ++deg )
    {
       var rad = deg * Math.PI / 180;
-      var x = Math.round( cx + r * Math.cos( rad ) );
-      var y = Math.round( cy - r * Math.sin( rad ) );  // screen y inverted
-      stamp( x, y );
+      pts.push( {
+         x: Math.round( cx + r * Math.cos( rad ) ),
+         y: Math.round( cy - r * Math.sin( rad ) )
+      } );
    }
-
-   // Arrowhead at the 30 deg endpoint (upper-right of the arc), tip
-   // extending DOWN along the tangent so it reads as "the arc
-   // continues around in this direction" = rotation.
+   // Arrowhead: filled triangle at the 30 deg endpoint, tip extending
+   // down along the tangent direction so it reads as "arc continues".
    var ax = Math.round( cx + r * Math.cos( 30 * Math.PI / 180 ) );
    var ay = Math.round( cy - r * Math.sin( 30 * Math.PI / 180 ) );
    var apexY = ay + 4;
@@ -1488,7 +1483,24 @@ function buildRotateCursorBitmap()
    {
       var hw = Math.round( 3 * dy / 4 );
       for ( var dx = -hw; dx <= hw; ++dx )
-         stamp( ax + dx + 1, apexY - dy );
+         pts.push( { x: ax + dx + 1, y: apexY - dy } );
+   }
+
+   // Pass 1: halo (opaque black, 1-px ring around every sample point).
+   for ( var i = 0; i < pts.length; ++i )
+   {
+      var p = pts[ i ];
+      safeSet( p.x - 1, p.y    , 0xff000000, 0x7f000000 );
+      safeSet( p.x + 1, p.y    , 0xff000000, 0x7f000000 );
+      safeSet( p.x    , p.y - 1, 0xff000000, 0x7f000000 );
+      safeSet( p.x    , p.y + 1, 0xff000000, 0x7f000000 );
+   }
+   // Pass 2: main centres (opaque white) - drawn LAST so any
+   // overlapping halo writes are overridden by the centre colour.
+   for ( var j = 0; j < pts.length; ++j )
+   {
+      var q = pts[ j ];
+      safeSet( q.x, q.y, 0xffffffff, 0x7fffffff );
    }
 
    return bmp;
@@ -1662,23 +1674,52 @@ function stampShapeOutlinesOnBitmap( bmp )
       // Inner "core" contour (dashed): visual guide for the solid
       // mask=1 zone inside an ellipse with feather > 0.
       //
-      // The inset is computed as (1 - gc) * rx (NOT capped against
-      // minR or minCurvature here); ellipseOffsetCurve handles the
-      // per-point geometric clamping internally so the slider stays
-      // responsive at every position without the curve folding.
+      // For an elongated ellipse a TRUE uniform offset curve can only
+      // exist while the inset is less than the local minimum radius
+      // of curvature R_min = min(rx,ry)^2 / max(rx,ry). Beyond that,
+      // a uniform offset is geometrically impossible (the curve folds
+      // or self-intersects). We use a HYBRID:
       //
-      // Using rx (the major axis) instead of min(rx, ry) maps the
-      // slider to a wider range of insets for elongated ellipses, so
-      // the user actually sees the inner curve shrink all the way
-      // toward the centre as the gradient drops to 0%.
+      //   inset <= 0.95 * R_min : pure offset curve (uniform gap).
+      //   inset >  0.95 * R_min : offset curve at the safe maximum,
+      //                           then uniformly scaled down toward
+      //                           the centre by the EXTRA inset.
+      //
+      // The slider stays responsive across its entire range, the
+      // curve never self-intersects, and the visual transition
+      // between the two modes is smooth.
       var gcShape = (s.gradientCenter != null)
                   ? s.gradientCenter : data.maskGradientCtr;
       if ( s.type === "ellipse" && gcShape < 0.99 )
       {
-         var desiredInset = (1 - gcShape) * Math.max( s.rx, s.ry );
-         if ( desiredInset >= 1 )
+         var minR    = Math.min( s.rx, s.ry );
+         var maxR    = Math.max( s.rx, s.ry );
+         var minCurv = (minR * minR) / maxR;
+         var safeMax = Math.max( 2, 0.95 * minCurv );
+
+         var desiredInset = (1 - gcShape) * maxR;
+         var offsetInset  = Math.min( desiredInset, safeMax );
+         var extra        = Math.max( 0, desiredInset - safeMax );
+         // After the offset curve has hit its safe-maximum inset,
+         // continue shrinking by uniform scaling. The factor goes
+         // from 1.0 (no extra) down to a small floor so the curve
+         // doesn't collapse into invisibility on very low gradient.
+         var scale = Math.max( 0.05, 1 - extra / maxR );
+
+         if ( offsetInset >= 1 )
          {
-            var cppts = ellipseOffsetCurve( s, desiredInset, 96 );
+            var cppts = ellipseOffsetCurve( s, offsetInset, 96 );
+            if ( scale < 0.999 )
+            {
+               // Uniform scale around the shape centre. Works in
+               // world coords because scaling around (cx, cy) is
+               // rotation-equivariant.
+               for ( var k = 0; k < cppts.length; ++k )
+               {
+                  cppts[k].x = s.cx + (cppts[k].x - s.cx) * scale;
+                  cppts[k].y = s.cy + (cppts[k].y - s.cy) * scale;
+               }
+            }
             bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
             bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
          }

@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.39"
+#define VERSION       "1.1.40"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -3264,11 +3264,9 @@ function CombinerDialog()
    scnrRow.addSpacing( 8 );
    scnrRow.add( this.scnrMagentaCheck );
    scnrRow.addStretch();
-   scnrRow.add( zoomLabel );
-   scnrRow.addSpacing( 4 );
-   scnrRow.add( this.zoomOutBtn );
-   scnrRow.add( this.zoomInBtn );
-   scnrRow.add( this.zoomFitBtn );
+   // Preview zoom controls moved to the bottom row (next to Apply /
+   // Close) in v1.1.40 to free horizontal space in the SCNR row and
+   // keep zoom near the global action buttons.
 
    // ---- Save stretched stars (optional second output) ----
    var keepLabel = new Label( this );
@@ -3705,6 +3703,14 @@ function CombinerDialog()
    btmRow.add( outLabel );
    btmRow.add( this.outIdEdit );
    btmRow.addStretch();
+   // Preview zoom controls (moved here in v1.1.40 from the stretch
+   // section so they sit next to the global action buttons).
+   btmRow.add( zoomLabel );
+   btmRow.addSpacing( 4 );
+   btmRow.add( this.zoomOutBtn );
+   btmRow.add( this.zoomInBtn );
+   btmRow.add( this.zoomFitBtn );
+   btmRow.addSpacing( 12 );
    btmRow.add( this.applyBtn );
    btmRow.add( this.closeBtn );
 

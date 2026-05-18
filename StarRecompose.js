@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "Astro DL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.27"
+#define VERSION       "1.1.28"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -2559,7 +2559,7 @@ function CombinerDialog()
    // Width of the longest label + a small padding so all colons line up.
    var labelWidth = this.font.width( "Remove Green via SCNR:" ) + 4;
 
-   this.windowTitle   = TITLE + " - v" + VERSION + " - " + BRAND;
+   this.windowTitle   = TITLE + " v" + VERSION + " - " + BRAND;
    this.userResizable = true;
 
    // ---- Starless ViewCombo ----
@@ -3195,7 +3195,7 @@ function CombinerDialog()
 
    // Credits line (brand visibility).
    this.creditLabel = new Label( this );
-   this.creditLabel.text = TOOL + " - v" + VERSION + " - " + BRAND
+   this.creditLabel.text = TOOL + " v" + VERSION + " - " + BRAND
                          + " - by Luis Jose DL - MIT License";
    this.creditLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
    this.creditLabel.styleSheet = "QLabel { color: gray; font-size: 8pt; }";

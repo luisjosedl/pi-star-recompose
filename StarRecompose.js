@@ -69,7 +69,12 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.34"
+#define VERSION       "1.1.35"
+
+// Set to 1 to log every preview setBitmap with bitmap stats. Used to
+// hunt down the "preview goes black on click" complaint. Switch off
+// for release once the cause is identified.
+#define DEBUG_PREVIEW 1
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1539,6 +1544,56 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
 
 var __updating = false;
 var __blackPreviewLogged = false;
+var __setBitmapSeq = 0;
+
+// Sample 9 points (3x3 grid) of `im` on channel 0 and return basic
+// stats. Helps distinguish "combine produced black" from "combine
+// produced normal output but the canvas painted black anyway".
+function sampleImageStats9( im )
+{
+   if ( im == null || im.width < 2 || im.height < 2 )
+      return { max: 0, mean: 0, n: 0 };
+   var max = 0, sum = 0, n = 0;
+   for ( var iy = 0; iy < 3; ++iy )
+      for ( var ix = 0; ix < 3; ++ix )
+      {
+         var px = Math.floor( im.width  * (ix + 1) / 4 );
+         var py = Math.floor( im.height * (iy + 1) / 4 );
+         var v = im.sample( px, py, 0 );
+         if ( v > max ) max = v;
+         sum += v;
+         ++n;
+      }
+   return { max: max, mean: sum / n, n: n };
+}
+
+// One-line debug log emitted right before every previewFrame.setBitmap.
+// Tag identifies which code path is painting (single-starless,
+// single-stars, mask, combine). bmp is the actual Bitmap that will be
+// passed to setBitmap; srcImg is the source Image used to render it
+// (so we can sample it directly).
+function logSetBitmap( tag, srcImg, bmp )
+{
+   if ( !DEBUG_PREVIEW ) return;
+   ++__setBitmapSeq;
+   var bw = (bmp != null) ? bmp.width  : -1;
+   var bh = (bmp != null) ? bmp.height : -1;
+   var stats = (srcImg != null) ? sampleImageStats9( srcImg )
+                                : { max: -1, mean: -1, n: 0 };
+   var hasShape = (data && data.activeShape != null);
+   var vm = (data && data.viewMode) ? data.viewMode : "?";
+   console.writeln(
+      "[preview #" + __setBitmapSeq + "] " + tag +
+      "  bmp=" + bw + "x" + bh +
+      "  max=" + stats.max.toFixed( 4 ) +
+      "  mean=" + stats.mean.toFixed( 4 ) +
+      "  viewMode=" + vm +
+      "  activeShape=" + hasShape +
+      "  strength=" + (data ? data.maskStrength : -1).toFixed( 2 ) +
+      "  invert=" + (data ? data.maskInvert : "?")
+   );
+}
+
 function updatePreview()
 {
    if ( __updating ) return;
@@ -1550,6 +1605,8 @@ function updatePreview()
    if ( !hasStarless && !hasStars )
    {
       // Nothing loaded yet - show the placeholder.
+      if ( DEBUG_PREVIEW )
+         console.writeln( "[preview] clearing (nothing loaded)" );
       ui.previewFrame.setBitmap( null );
       return;
    }
@@ -1562,7 +1619,10 @@ function updatePreview()
       if ( hasStarless && !hasStars )
       {
          // Show the starless as-is (no processing needed).
-         ui.previewFrame.setBitmap( data.starlessSmall.mainView.image.render() );
+         var slOnlyIm = data.starlessSmall.mainView.image;
+         var slOnlyBmp = slOnlyIm.render();
+         logSetBitmap( "single-starless", slOnlyIm, slOnlyBmp );
+         ui.previewFrame.setBitmap( slOnlyBmp );
          return;
       }
       if ( hasStars && !hasStarless )
@@ -1579,7 +1639,10 @@ function updatePreview()
             if ( data.removeGreen )   applySCNRGreen( data.starsProc.mainView );
             if ( data.removeMagenta ) applyMagentaRemoval( data.starsProc.mainView );
          }
-         ui.previewFrame.setBitmap( data.starsProc.mainView.image.render() );
+         var stProcIm  = data.starsProc.mainView.image;
+         var stProcBmp = stProcIm.render();
+         logSetBitmap( "single-stars", stProcIm, stProcBmp );
+         ui.previewFrame.setBitmap( stProcBmp );
          return;
       }
 
@@ -1628,46 +1691,44 @@ function updatePreview()
          );
       }
 
-      var bmp = data.previewSmall.mainView.image.render();
+      var pvIm  = data.previewSmall.mainView.image;
+      var bmp   = pvIm.render();
 
-      // Diagnostic: if the combined preview comes out as a fully-black
-      // image, log what we know so we can debug the user's complaint
-      // about "everything goes black on click". One-shot per session
-      // to avoid console spam.
-      if ( !__blackPreviewLogged && data.viewMode !== "mask" )
+      // Always-on diagnostic for the "black preview" hunt.
+      var tag = (data.viewMode === "mask") ? "mask" :
+                ((data.viewMode === "result") ? "combine+mask" : "combine");
+      logSetBitmap( tag, pvIm, bmp );
+
+      // Loud warning if the rendered preview image really IS all-black
+      // (max of 9 samples below 0.001). Independent of the verbose log
+      // above so it stands out in the console.
+      if ( !__blackPreviewLogged )
       {
-         var im0 = data.previewSmall.mainView.image;
-         var s1 = im0.sample( Math.floor( im0.width  * 0.25 ),
-                              Math.floor( im0.height * 0.25 ), 0 );
-         var s2 = im0.sample( Math.floor( im0.width  * 0.75 ),
-                              Math.floor( im0.height * 0.75 ), 0 );
-         var s3 = im0.sample( Math.floor( im0.width  * 0.5  ),
-                              Math.floor( im0.height * 0.5  ), 0 );
-         if ( s1 < 0.001 && s2 < 0.001 && s3 < 0.001 )
+         var stats = sampleImageStats9( pvIm );
+         if ( stats.max < 0.001 )
          {
             __blackPreviewLogged = true;
             console.show();
-            console.warningln( "* AstroDL: preview is fully black after combine." );
-            console.writeln( "  viewMode = " + data.viewMode +
-                             ", activeShape = " + (data.activeShape != null) +
-                             ", maskStrength = " + data.maskStrength );
+            console.warningln( "* AstroDL: preview image is fully black (max=" +
+                               stats.max.toFixed( 6 ) + ", mean=" +
+                               stats.mean.toFixed( 6 ) + ")." );
             if ( data.starlessSmall != null )
             {
-               var sl = data.starlessSmall.mainView.image;
-               console.writeln( "  starlessSmall " + sl.width + "x" + sl.height +
-                                " ch=" + sl.numberOfChannels +
-                                " sample(0.5,0.5,0)=" +
-                                sl.sample( Math.floor(sl.width*0.5),
-                                           Math.floor(sl.height*0.5), 0 ).toFixed( 4 ) );
+               var slS = sampleImageStats9( data.starlessSmall.mainView.image );
+               console.writeln( "  starlessSmall  max=" + slS.max.toFixed( 4 ) +
+                                " mean=" + slS.mean.toFixed( 4 ) );
             }
             if ( data.starsSmall != null )
             {
-               var st = data.starsSmall.mainView.image;
-               console.writeln( "  starsSmall " + st.width + "x" + st.height +
-                                " ch=" + st.numberOfChannels +
-                                " sample(0.5,0.5,0)=" +
-                                st.sample( Math.floor(st.width*0.5),
-                                           Math.floor(st.height*0.5), 0 ).toFixed( 4 ) );
+               var stS = sampleImageStats9( data.starsSmall.mainView.image );
+               console.writeln( "  starsSmall     max=" + stS.max.toFixed( 4 ) +
+                                " mean=" + stS.mean.toFixed( 4 ) );
+            }
+            if ( data.starsProc != null )
+            {
+               var spS = sampleImageStats9( data.starsProc.mainView.image );
+               console.writeln( "  starsProc      max=" + spS.max.toFixed( 4 ) +
+                                " mean=" + spS.mean.toFixed( 4 ) );
             }
          }
       }
@@ -2025,6 +2086,20 @@ function PreviewFrame( parent )
          // overlays there to avoid double-rendering.
          if ( data.viewMode === "edit" || data.viewMode === "result" )
          {
+            if ( DEBUG_PREVIEW &&
+                 (data.maskOverlayBitmap != null
+               || data.maskPendingOverlayBitmap != null) )
+            {
+               // Logs once per repaint when overlays exist - useful
+               // to confirm whether the Multiply blend is what is
+               // turning the preview black.
+               console.writeln(
+                  "[paint] overlays  committed=" +
+                  (data.maskOverlayBitmap != null) +
+                  "  pending=" +
+                  (data.maskPendingOverlayBitmap != null) +
+                  "  compOp=Multiply(12)" );
+            }
             try { g.compositionOperator = 12; } catch ( ce ) {}
             if ( data.maskOverlayBitmap != null )
             {

@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.24"
+#define VERSION       "1.1.25"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -133,6 +133,8 @@ function CombinerData()
    this.blackPoint       = BLACK_DEF;
    this.colorBoost       = BOOST_DEF;
    this.removeGreen      = false;
+   this.removeMagenta    = false;
+   this.perChannelStretch = true;   // per-channel ArcsinhStretch (more colorful)
    this.outputId         = "Combined";
    this.keepStars        = false;
    this.starsOutputId    = "Stars_Stretched";
@@ -167,11 +169,13 @@ function CombinerData()
    // triangle at the bottom-left drags a snapshot to the workspace).
    this.save = function()
    {
-      Parameters.set( "stretchIntensity", this.stretchIntensity );
-      Parameters.set( "blackPoint",       this.blackPoint );
-      Parameters.set( "colorBoost",       this.colorBoost );
-      Parameters.set( "removeGreen",      this.removeGreen );
-      Parameters.set( "outputId",         this.outputId );
+      Parameters.set( "stretchIntensity",  this.stretchIntensity );
+      Parameters.set( "blackPoint",        this.blackPoint );
+      Parameters.set( "colorBoost",        this.colorBoost );
+      Parameters.set( "removeGreen",       this.removeGreen );
+      Parameters.set( "removeMagenta",     this.removeMagenta );
+      Parameters.set( "perChannelStretch", this.perChannelStretch );
+      Parameters.set( "outputId",          this.outputId );
       Parameters.set( "keepStars",        this.keepStars );
       Parameters.set( "starsOutputId",    this.starsOutputId );
    };
@@ -189,6 +193,10 @@ function CombinerData()
          this.colorBoost = Parameters.getReal( "colorBoost" );
       if ( Parameters.has( "removeGreen" ) )
          this.removeGreen = Parameters.getBoolean( "removeGreen" );
+      if ( Parameters.has( "removeMagenta" ) )
+         this.removeMagenta = Parameters.getBoolean( "removeMagenta" );
+      if ( Parameters.has( "perChannelStretch" ) )
+         this.perChannelStretch = Parameters.getBoolean( "perChannelStretch" );
       if ( Parameters.has( "outputId" ) )
          this.outputId = Parameters.getString( "outputId" );
       if ( Parameters.has( "keepStars" ) )
@@ -466,13 +474,18 @@ function copyInto( srcId, destView )
 //    With useRgbws=true and protectHighlights=true so star colors are
 //    preserved instead of being clipped to white. The UI intensity is
 //    passed directly to ArcsinhStretch.stretch with no scaling.
-function applyArcsinh( view, intensity, blackPoint )
+function applyArcsinh( view, intensity, blackPoint, perChannel )
 {
    var AS = new ArcsinhStretch;
    AS.stretch              = intensity;
    AS.blackPoint           = blackPoint;
    AS.protectHighlights    = true;
-   AS.useRgbws             = true;
+   // useRgbws=true preserves color ratios (gentler, more "luminance"
+   // looking). useRgbws=false runs the stretch on each RGB channel
+   // independently, which produces more saturated star colors (this
+   // is what Marek's Star Stretch does, and matches what users
+   // typically expect from a "punchy" star stretch).
+   AS.useRgbws             = !perChannel;
    AS.executeOn( view, false );
 }
 
@@ -492,13 +505,15 @@ function applyColorSat( view, boost )
    CS.executeOn( view, false );
 }
 
-// 4. SCNR Green - native PI process (Russell Croman).
-function applySCNR( view )
+// 4. SCNR - native PI process (Russell Croman). Removes the chosen
+// chrominance cast (Green is the most common in OSC astrophoto, but
+// Magenta also helps cameras that over-correct green).
+function applySCNR( view, channel )
 {
    var P = new SCNR;
    P.amount             = 1.00;
    P.protectionMethod   = SCNR.prototype.AverageNeutral;
-   P.colorToRemove      = SCNR.prototype.Green;
+   P.colorToRemove      = channel;
    P.preserveLightness  = true;
    P.executeOn( view, false );
 }
@@ -1069,11 +1084,118 @@ function makeBrush( color )
    return brush;
 }
 
-// Stroke a closed polygon as outline only, with a black "shadow" line
-// underneath the colored line for high-contrast visibility on top of
-// arbitrary preview content (works on bright color or pitch black).
-// Tries Graphics.strokePolygon first (pen-only, no brush involved);
-// falls back to a drawLine loop if strokePolygon isn't available.
+// =====================================================================
+// Bitmap-based outline rendering. The Pen / Brush color APIs in PJSR
+// were observed to render lines as opaque black on the user's PI
+// build regardless of the requested color. To work around it we
+// render the active shape overlay (outline + handles) into a
+// transparent Bitmap via setPixel (which DOES honor colors) and then
+// blit the bitmap onto the canvas via drawBitmap.
+// =====================================================================
+
+// Pack ARGB into a single uint32.
+function argb( a, r, g, b )
+{
+   return ((a & 0xff) * 16777216)
+        + ((r & 0xff) * 65536)
+        + ((g & 0xff) * 256)
+        +  (b & 0xff);
+}
+
+// Plot a single pixel safely (skips out-of-bounds coords).
+function plotPixel( bmp, x, y, color )
+{
+   x = Math.round( x );
+   y = Math.round( y );
+   if ( x < 0 || y < 0 || x >= bmp.width || y >= bmp.height ) return;
+   bmp.setPixel( x, y, color );
+}
+
+// Bresenham thick line on a Bitmap. Thickness is approximated by
+// stamping a square at each Bresenham step.
+function bmpThickLine( bmp, x1, y1, x2, y2, color, thickness )
+{
+   x1 = Math.round( x1 ); y1 = Math.round( y1 );
+   x2 = Math.round( x2 ); y2 = Math.round( y2 );
+   var dx = Math.abs( x2 - x1 ), dy = Math.abs( y2 - y1 );
+   var sx = (x1 < x2) ? 1 : -1;
+   var sy = (y1 < y2) ? 1 : -1;
+   var err = dx - dy;
+   var half = Math.max( 0, Math.floor( (thickness - 1) / 2 ) );
+   while ( true )
+   {
+      for ( var oy = -half; oy <= half; ++oy )
+         for ( var ox = -half; ox <= half; ++ox )
+            plotPixel( bmp, x1 + ox, y1 + oy, color );
+      if ( x1 === x2 && y1 === y2 ) break;
+      var e2 = err * 2;
+      if ( e2 > -dy ) { err -= dy; x1 += sx; }
+      if ( e2 <  dx ) { err += dx; y1 += sy; }
+   }
+}
+
+// Stroke a closed polygon onto a bitmap. If `dashed`, draws short
+// dashes (4 px segments) along the path instead of a solid line.
+function bmpStrokeClosedPath( bmp, pts, color, thickness, dashed )
+{
+   if ( pts == null || pts.length < 2 ) return;
+   for ( var i = 0; i < pts.length; ++i )
+   {
+      var pa = pts[i];
+      var pb = pts[ (i + 1) % pts.length ];
+      if ( !dashed )
+      {
+         bmpThickLine( bmp, pa.x, pa.y, pb.x, pb.y, color, thickness );
+      }
+      else
+      {
+         var segLen = Math.sqrt( (pb.x - pa.x)*(pb.x - pa.x)
+                               + (pb.y - pa.y)*(pb.y - pa.y) );
+         var n = Math.max( 1, Math.floor( segLen / 4 ) );
+         for ( var k = 0; k < n; ++k )
+         {
+            if ( k % 2 !== 0 ) continue;     // gap
+            var t1 = k / n, t2 = (k + 1) / n;
+            bmpThickLine( bmp,
+               pa.x + (pb.x - pa.x) * t1, pa.y + (pb.y - pa.y) * t1,
+               pa.x + (pb.x - pa.x) * t2, pa.y + (pb.y - pa.y) * t2,
+               color, thickness );
+         }
+      }
+   }
+}
+
+// Filled square handle (with outline).
+function bmpFillRect( bmp, cx, cy, halfSize, fillColor, outlineColor )
+{
+   for ( var oy = -halfSize; oy <= halfSize; ++oy )
+      for ( var ox = -halfSize; ox <= halfSize; ++ox )
+      {
+         var c = (Math.abs(ox) === halfSize || Math.abs(oy) === halfSize)
+               ? outlineColor : fillColor;
+         plotPixel( bmp, cx + ox, cy + oy, c );
+      }
+}
+
+// Filled circle handle (with outline).
+function bmpFillCircle( bmp, cx, cy, radius, fillColor, outlineColor )
+{
+   var r2 = radius * radius;
+   var rIn2 = (radius - 1) * (radius - 1);
+   for ( var oy = -radius; oy <= radius; ++oy )
+      for ( var ox = -radius; ox <= radius; ++ox )
+      {
+         var d2 = ox*ox + oy*oy;
+         if ( d2 > r2 ) continue;
+         var c = (d2 > rIn2) ? outlineColor : fillColor;
+         plotPixel( bmp, cx + ox, cy + oy, c );
+      }
+}
+
+// =====================================================================
+// Legacy Graphics-based stroke (kept available; not currently used).
+// =====================================================================
+
 function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
 {
    if ( pts == null || pts.length < 2 ) return;
@@ -1320,12 +1442,15 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
                      isColor, useMask )
 {
    copyInto( starsSrcId, procView );
-   applyArcsinh( procView, data.stretchIntensity, data.blackPoint );
+   applyArcsinh( procView, data.stretchIntensity, data.blackPoint,
+                 data.perChannelStretch );
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
       if ( data.removeGreen )
-         applySCNR( procView );
+         applySCNR( procView, SCNR.prototype.Green );
+      if ( data.removeMagenta )
+         applySCNR( procView, SCNR.prototype.Magenta );
    }
    var maskId    = null, pendingId = null, activeExp = null;
    if ( useMask && data.maskStrength > 0 )
@@ -1457,12 +1582,15 @@ function applyFinal()
       // Copy stars at full res into the temp window and run the stretch
       // pipeline on it (operates in-place).
       copyInto( data.starsView.id, tw.mainView );
-      applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint );
+      applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint,
+                    data.perChannelStretch );
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
          if ( data.removeGreen )
-            applySCNR( tw.mainView );
+            applySCNR( tw.mainView, SCNR.prototype.Green );
+         if ( data.removeMagenta )
+            applySCNR( tw.mainView, SCNR.prototype.Magenta );
       }
 
       // If the user painted a raster mask, build a full-resolution
@@ -1806,12 +1934,29 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Main outline with black-shadow + colored stroke combo
-            // for visibility against any preview content.
-            strokeClosedPathWithShadow( g, pts, maskAccentPen(), 2.0, false );
+            // Render shape outline + handles into a transparent bitmap
+            // and blit it onto the canvas. Pen / Brush colors were
+            // observed to render as black on the user's PJSR build, so
+            // we bypass the Pen API entirely and write pixel colors
+            // directly via Bitmap.setPixel (which DOES honor colors,
+            // as the preview itself proves).
+            var cw = self.width, ch = self.height;
+            var uiBmp = new Bitmap( cw, ch );
+            uiBmp.fill( 0 );      // transparent
 
-            // Inner "core" contour (dashed): where solid mask=1 ends
-            // and the gradient starts. Only when gc < 1.
+            // High-saturation red outline (no alpha issue: full opaque
+            // is OK on Bitmap because we control the pixel values
+            // directly, not going through Pen).
+            var shadowColor = argb( 0xff, 0, 0, 0 );           // black
+            var mainColor   = data.maskInvert
+                            ? argb( 0xff, 0x00, 0xcc, 0xff )   // cyan
+                            : argb( 0xff, 0xff, 0x00, 0x00 );  // RED
+
+            // Main outline: shadow + colored stroke.
+            bmpStrokeClosedPath( uiBmp, pts, shadowColor, 4, false );
+            bmpStrokeClosedPath( uiBmp, pts, mainColor,   2, false );
+
+            // Inner "core" contour (dashed).
             var gcShape = (s.gradientCenter != null)
                         ? s.gradientCenter : data.maskGradientCtr;
             if ( s.type === "ellipse" && gcShape < 0.99
@@ -1828,75 +1973,46 @@ function PreviewFrame( parent )
                   var ccp = self._imageRectToCanvas( cwx, cwy, cwx, cwy );
                   corePts.push( new Point( ccp.x0, ccp.y0 ) );
                }
-               strokeClosedPathWithShadow( g, corePts, maskAccentPen(),
-                                           1.5, true );
+               bmpStrokeClosedPath( uiBmp, corePts, shadowColor, 3, true );
+               bmpStrokeClosedPath( uiBmp, corePts, mainColor,   1, true );
             }
 
             // Draw the 4 corner handles + the rotation handle.
             var handles = getActiveShapeHandles();
+            var handleFill    = data.maskInvert
+                              ? argb( 0xff, 0x00, 0xcc, 0xff )
+                              : argb( 0xff, 0xff, 0x00, 0x00 );
+            var handleOutline = argb( 0xff, 0xff, 0xff, 0xff );  // white
+            var rotFill       = argb( 0xff, 0x22, 0xaa, 0x22 );  // green
+            var rotOutline    = argb( 0xff, 0xff, 0xff, 0xff );
+
             for ( var h = 0; h < handles.length; ++h )
             {
                var hc = self._imageRectToCanvas(
                   handles[h].x, handles[h].y,
                   handles[h].x, handles[h].y );
+               var hx = Math.round( hc.x0 ), hy = Math.round( hc.y0 );
+
                if ( handles[h].mode === "rotate" )
                {
-                  // Larger green circle for the rotation handle, with
-                  // an inscribed curved-arrow icon so it's visually
-                  // distinct from the resize handles. Colors use
-                  // alpha 0x7f to avoid PJSR's int32-wrap color bug.
-                  g.pen   = makePen( 0x7f66ff66, 1.5 );
-                  g.brush = makeBrush( 0x7f224422 );
-                  g.drawEllipse( new Rect( hc.x0 - 9, hc.y0 - 9,
-                                           hc.x0 + 9, hc.y0 + 9 ) );
-                  // Curved arrow inside (small "C" with arrowhead).
-                  g.pen   = makePen( 0x7fffffff, 1.4 );
-                  g.brush = makeBrush( 0x00000000 );
-                  var arcR = 4.5;
-                  var arcN = 14;
-                  var arcStart = -Math.PI / 2;          // start at top
-                  var arcSweep = 1.5 * Math.PI;          // 270 degrees
-                  var lastX = hc.x0 + arcR * Math.cos( arcStart );
-                  var lastY = hc.y0 + arcR * Math.sin( arcStart );
-                  for ( var aIdx = 1; aIdx <= arcN; ++aIdx )
-                  {
-                     var aFrac = aIdx / arcN;
-                     var ang   = arcStart + arcSweep * aFrac;
-                     var nx = hc.x0 + arcR * Math.cos( ang );
-                     var ny = hc.y0 + arcR * Math.sin( ang );
-                     g.drawLine( lastX, lastY, nx, ny );
-                     lastX = nx; lastY = ny;
-                  }
-                  // Arrowhead at the end of the arc.
-                  var endAng = arcStart + arcSweep;
-                  var tipX = hc.x0 + arcR * Math.cos( endAng );
-                  var tipY = hc.y0 + arcR * Math.sin( endAng );
-                  // Tangent direction at the tip (rotated 90 from radial).
-                  var tdx = -Math.sin( endAng );
-                  var tdy =  Math.cos( endAng );
-                  // Two short lines forming the arrowhead.
-                  g.drawLine( tipX, tipY,
-                              tipX - 3 * tdx + 2 * Math.cos( endAng ),
-                              tipY - 3 * tdy + 2 * Math.sin( endAng ) );
-                  g.drawLine( tipX, tipY,
-                              tipX - 3 * tdx - 2 * Math.cos( endAng ),
-                              tipY - 3 * tdy - 2 * Math.sin( endAng ) );
-                  // Stem connecting to the top center of the shape.
+                  // Stem connecting handle to the top center of the shape.
                   var localTopX = 0, localTopY = -s.ry;
                   var topWx = s.cx + localTopX * co - localTopY * si;
                   var topWy = s.cy + localTopX * si + localTopY * co;
                   var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
-                  g.pen = makePen( 0x7f66ff66, 1.5 );
-                  g.drawLine( topC.x0, topC.y0, hc.x0, hc.y0 );
+                  bmpThickLine( uiBmp, topC.x0, topC.y0, hx, hy, rotFill, 2 );
+                  bmpFillCircle( uiBmp, hx, hy, 8, rotFill, rotOutline );
                }
                else
                {
-                  // Filled squares for resize handles, accent color.
-                  g.pen   = makePen( 0x7fffffff, 1.5 );
-                  g.brush = makeBrush( maskAccentSolid() );
-                  g.drawRect( new Rect( hc.x0 - 5, hc.y0 - 5,
-                                        hc.x0 + 5, hc.y0 + 5 ) );
+                  bmpFillRect( uiBmp, hx, hy, 5, handleFill, handleOutline );
                }
+            }
+
+            try { g.drawBitmap( 0, 0, uiBmp ); }
+            catch ( de ) {
+               try { g.drawBitmap( new Point( 0, 0 ), uiBmp ); }
+               catch ( de2 ) {}
             }
          }
 
@@ -2151,7 +2267,17 @@ function PreviewFrame( parent )
       self._drawStart   = p;
       self._drawCurrent = p;
       self._cursorImg   = p;
+
+      // Auto-switch the Preview View to "Result" so the user sees the
+      // mask effect immediately as they draw / edit the shape.
+      if ( data.viewMode === "edit" && ui && ui.viewModeCombo )
+      {
+         data.viewMode = "result";
+         ui.viewModeCombo.currentItem = 1;
+      }
+
       updateCommitButton();
+      scheduleUpdate();
       self.repaint();
    };
 
@@ -2542,17 +2668,48 @@ function CombinerDialog()
 
    // ---- SCNR row + zoom toolbar ----
    var scnrLabel = new Label( this );
-   scnrLabel.text          = "Remove Green via SCNR:";
+   scnrLabel.text          = "Remove via SCNR:";
    scnrLabel.setFixedWidth( labelWidth );
    scnrLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
 
    this.scnrCheck = new CheckBox( this );
-   this.scnrCheck.text    = "";
+   this.scnrCheck.text    = "Green";
    this.scnrCheck.checked = data.removeGreen;
-   this.scnrCheck.toolTip = "Apply SCNR Green (AverageNeutral, preserveLightness) on the stretched stars.";
+   this.scnrCheck.toolTip = "Apply SCNR Green (AverageNeutral, preserveLightness) on " +
+                            "the stretched stars. Standard for OSC astrophoto where a " +
+                            "green cast remains after color calibration.";
    this.scnrCheck.onCheck = function( c )
    {
       data.removeGreen = c;
+      scheduleUpdate();
+   };
+
+   this.scnrMagentaCheck = new CheckBox( this );
+   this.scnrMagentaCheck.text    = "Magenta";
+   this.scnrMagentaCheck.checked = data.removeMagenta;
+   this.scnrMagentaCheck.toolTip = "Apply SCNR Magenta on the stretched stars. " +
+                                   "Useful when SCNR Green over-corrects (or the " +
+                                   "camera already pulled green) and leaves a magenta " +
+                                   "cast in the stars layer.";
+   this.scnrMagentaCheck.onCheck = function( c )
+   {
+      data.removeMagenta = c;
+      scheduleUpdate();
+   };
+
+   this.perChannelCheck = new CheckBox( this );
+   this.perChannelCheck.text    = "Per-channel stretch";
+   this.perChannelCheck.checked = data.perChannelStretch;
+   this.perChannelCheck.toolTip = "Apply the ArcsinhStretch to each RGB channel " +
+                                  "independently. Produces more saturated star " +
+                                  "colors (yellow / orange / blue stars stand out), " +
+                                  "at the cost of slightly altered hue. Unchecked = " +
+                                  "luminance-based (RGB working space) stretch, " +
+                                  "preserves color ratios but stars look paler.\n" +
+                                  "Default: ON.";
+   this.perChannelCheck.onCheck = function( c )
+   {
+      data.perChannelStretch = c;
       scheduleUpdate();
    };
 
@@ -2582,6 +2739,10 @@ function CombinerDialog()
    scnrRow.spacing = 4;
    scnrRow.add( scnrLabel );
    scnrRow.add( this.scnrCheck );
+   scnrRow.addSpacing( 8 );
+   scnrRow.add( this.scnrMagentaCheck );
+   scnrRow.addSpacing( 16 );
+   scnrRow.add( this.perChannelCheck );
    scnrRow.addStretch();
    scnrRow.add( zoomLabel );
    scnrRow.addSpacing( 4 );

@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.47"
+#define VERSION       "1.1.48"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1401,7 +1401,7 @@ function getRotateCursor()
    try {
       var bmp = buildRotateCursorBitmap();
       // Cursor( bitmap, hotspotX, hotspotY ): hotspot at center of bmp.
-      __rotateCursor = new Cursor( bmp, 12, 12 );
+      __rotateCursor = new Cursor( bmp, 13, 13 );
    } catch ( e ) {
       __rotateCursor = null;
    }
@@ -1410,22 +1410,24 @@ function getRotateCursor()
 
 function buildRotateCursorBitmap()
 {
-   var size = 24;
+   // v1.1.48: bumped from 24x24 to 26x26 (~10% larger) and inverted
+   // the palette - the main stroke is now WHITE (more visible on dark
+   // sky) wrapped in a 1-px BLACK halo (which keeps it readable on
+   // bright nebula cores).
+   var size = 26;
    var bmp  = makeAlphaBitmap( size, size );
-   var cx   = 12, cy = 12;
-   var r    = 8;
-   var blk  = 0x7f000000;      // black with 50% alpha (positive int32)
-   var wht  = 0x7fffffff;      // white outline (positive int32)
+   var cx   = 13, cy = 13;
+   var r    = 9;
+   var wht  = 0x7fffffff;      // main stroke (positive int32)
+   var blk  = 0x7f000000;      // halo for contrast
 
-   // Stamp pixel with a 1-px white halo so the cursor is visible on
-   // both dark and light backgrounds.
    function stamp( x, y )
    {
-      plotPixel( bmp, x - 1, y    , wht );
-      plotPixel( bmp, x + 1, y    , wht );
-      plotPixel( bmp, x    , y - 1, wht );
-      plotPixel( bmp, x    , y + 1, wht );
-      plotPixel( bmp, x    , y    , blk );
+      plotPixel( bmp, x - 1, y    , blk );
+      plotPixel( bmp, x + 1, y    , blk );
+      plotPixel( bmp, x    , y - 1, blk );
+      plotPixel( bmp, x    , y + 1, blk );
+      plotPixel( bmp, x    , y    , wht );
    }
 
    // 3/4 circle arc: 30 deg to 300 deg (CCW), leaving a 90 deg gap on
@@ -1439,22 +1441,16 @@ function buildRotateCursorBitmap()
    }
 
    // Arrowhead at the 30 deg endpoint (upper-right of the arc), tip
-   // pointing DOWN along the tangent so it reads as "the arc continues
-   // around in this direction" = rotation.
-   //   Tangent CCW at 30 deg in screen coords: (sin30, cos30) = (0.5, 0.866)
-   //   That direction is down-right; the arrowhead tip extends along it.
-   // The triangle is filled as concentric rows from apex to base.
-   var ax = Math.round( cx + r * Math.cos( 30 * Math.PI / 180 ) );  // 19
-   var ay = Math.round( cy - r * Math.sin( 30 * Math.PI / 180 ) );  // 8
-   // Use a simple axis-aligned triangle pointing DOWN as a readable
-   // approximation of the tangent direction (good enough at 24x24).
+   // extending DOWN along the tangent so it reads as "the arc
+   // continues around in this direction" = rotation.
+   var ax = Math.round( cx + r * Math.cos( 30 * Math.PI / 180 ) );
+   var ay = Math.round( cy - r * Math.sin( 30 * Math.PI / 180 ) );
    var apexY = ay + 4;
    for ( var dy = 0; dy <= 4; ++dy )
    {
-      // Row at offset dy from apex: width grows from 0 (apex) to 3 (base).
       var hw = Math.round( 3 * dy / 4 );
       for ( var dx = -hw; dx <= hw; ++dx )
-         stamp( ax + dx + 1, apexY - dy );    // shift +1 so it sits to the right of the arc end
+         stamp( ax + dx + 1, apexY - dy );
    }
 
    return bmp;
@@ -2928,9 +2924,15 @@ function PreviewFrame( parent )
 
    // Map a hit-test mode string to a sensible PJSR cursor. Corner
    // handles use the pointing hand (universal "grab me" signal);
-   // the rotation handle uses a custom 24x24 bitmap cursor drawn as
+   // the rotation handle uses a custom 26x26 bitmap cursor drawn as
    // a 3/4-circle arrow (see buildRotateCursorBitmap above) since
    // PJSR has no StdCursor_Rotate.
+   //
+   // Default (mode = null = cursor not over any handle or body):
+   //   - Ellipse tool active AND no shape exists yet -> Cross
+   //     (the universal "click to start drawing" cursor used by
+   //     Photoshop / Illustrator / GIMP shape tools)
+   //   - Otherwise -> Arrow (neutral)
    this._modeToCursor = function( mode )
    {
       switch ( mode )
@@ -2942,6 +2944,8 @@ function PreviewFrame( parent )
          case "rotate":    return ROTATE_CURSOR_ID;
          case "move":      return StdCursor_SizeAll;
       }
+      if ( data.maskTool === "ellipse" && data.activeShape == null )
+         return StdCursor_Cross;
       return StdCursor_Arrow;
    };
 
@@ -3269,6 +3273,15 @@ function PreviewFrame( parent )
       self._lastCursorId = -999;
       if ( data.maskTool === "pan" )
          self._setCursorId( StdCursor_OpenHand );
+      else if ( data.maskTool === "ellipse" )
+      {
+         // Crosshair signals "click here to start a new ellipse"
+         // while no shape exists; once one is drawn, hover events
+         // will swap in the handle cursors via _modeToCursor.
+         self._setCursorId( data.activeShape == null
+                            ? StdCursor_Cross
+                            : StdCursor_Arrow );
+      }
       else
          self._setCursorId( StdCursor_Cross );
    };

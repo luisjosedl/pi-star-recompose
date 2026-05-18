@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.41"
+#define VERSION       "1.1.42"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -174,6 +174,15 @@ function CombinerData()
    // mask. Edit / Delete operations remove the shape from this list and
    // rebuild the raster mask from scratch using whatever remains.
    this.shapes           = [];
+
+   // Reference to the Image whose render() is the current preview
+   // bitmap source (starlessSmall, starsProc, or previewSmall depending
+   // on which branch updatePreview took). refreshPreviewWithOutlines()
+   // calls render() on this image to rebuild the bitmap before stamping
+   // shape outlines via Bitmap.setPixel. Set by updatePreview, read by
+   // mouse handlers that need to refresh outlines without rerunning the
+   // combine pipeline.
+   this.lastPreviewSrcImg = null;
 
    // Persist current values into the script instance (the New Instance
    // triangle at the bottom-left drags a snapshot to the workspace).
@@ -1306,6 +1315,180 @@ function bmpFillCircle( bmp, cx, cy, radius, fillColor, outlineColor )
       }
 }
 
+// =====================================================================
+// Shape outline stamping (v1.1.42+).
+//
+// We render shape outlines + handles by writing pixels DIRECTLY into
+// the rendered preview bitmap via Bitmap.setPixel. This is the only
+// PJSR rendering primitive that has been verified to honour colors
+// in this build:
+//   * new Pen( color, width )    -> color ignored, renders as black
+//   * g.fillRect( rect, brush )  -> brush color ignored, renders black
+//   * g.drawScaledBitmap(...)    -> works (the preview itself)
+//   * Bitmap.setPixel(x, y, c)   -> honours c when packed value fits
+//                                   in positive int32
+//
+// Colors must use alpha 0x7f or lower so the packed value
+// (a<<24 | rgb) stays < 2^31. Alpha 0xff overflows JS Number into a
+// negative int32, which PJSR's colour bridge sanitises to opaque
+// black - exactly the "outline still renders black" bug.
+// =====================================================================
+
+// Build polygon vertices around the perimeter of `s` in IMAGE/BITMAP
+// coordinates (same coordinate system the preview bitmap uses, so they
+// can be fed straight into bmp.setPixel via the bmp* helpers).
+function shapePerimeterPoints( s, N )
+{
+   var pts = [];
+   var co = Math.cos( s.angle );
+   var si = Math.sin( s.angle );
+   if ( s.type === "ellipse" )
+   {
+      for ( var i = 0; i < N; ++i )
+      {
+         var th = (i / N) * 2 * Math.PI;
+         var lx = s.rx * Math.cos( th );
+         var ly = s.ry * Math.sin( th );
+         pts.push( {
+            x: s.cx + lx * co - ly * si,
+            y: s.cy + lx * si + ly * co
+         } );
+      }
+   }
+   else // rect
+   {
+      var local = [ [-s.rx, -s.ry], [s.rx, -s.ry],
+                    [ s.rx,  s.ry], [-s.rx,  s.ry] ];
+      for ( var k = 0; k < 4; ++k )
+      {
+         pts.push( {
+            x: s.cx + local[k][0] * co - local[k][1] * si,
+            y: s.cy + local[k][0] * si + local[k][1] * co
+         } );
+      }
+   }
+   return pts;
+}
+
+// Stamp the active shape outline + handles AND all committed shapes'
+// thin outlines onto `bmp`. Mutates `bmp` in place. Safe to call with
+// a null or invalid bitmap.
+//
+// COLOR FORMAT: 0x00RRGGBB (alpha byte = 0x00). This keeps the packed
+// value well below 2^31 so JavaScript Number -> PJSR int32 conversion
+// never overflows into a negative value (which PJSR's color bridge
+// sanitises to opaque black - the long-standing "outline is black"
+// bug). On RGB32 destination bitmaps (which Image.render() returns for
+// 3-channel images) the alpha byte is ignored, and the lower 24 RGB
+// bits are written verbatim - exactly what we want.
+function stampShapeOutlinesOnBitmap( bmp )
+{
+   if ( bmp == null || bmp.width == null || bmp.width < 2 ) return;
+   if ( data == null ) return;
+   if ( data.viewMode === "mask" ) return;     // mask view = the mask is the preview
+
+   // ----- Committed shapes: thinner orange (or cyan in Invert mode) -----
+   if ( data.shapes && data.shapes.length > 0 )
+   {
+      var cShadow = 0x00000000;                          // black halo
+      var cMain   = data.maskInvert
+                  ? 0x0000ffff                           // cyan
+                  : 0x00ff8000;                          // orange
+      for ( var i = 0; i < data.shapes.length; ++i )
+      {
+         var pts = shapePerimeterPoints( data.shapes[i],
+                                         data.shapes[i].type === "ellipse" ? 64 : 4 );
+         bmpStrokeClosedPath( bmp, pts, cShadow, 3, false );
+         bmpStrokeClosedPath( bmp, pts, cMain,   1, false );
+      }
+   }
+
+   // ----- Active shape: bright yellow (or cyan) outline + handles -----
+   if ( data.activeShape != null
+     && (data.maskTool === "ellipse" || data.maskTool === "rect") )
+   {
+      var s = data.activeShape;
+      var aShadow = 0x00000000;                          // black halo
+      var aMain   = data.maskInvert
+                  ? 0x0000ffff                           // cyan
+                  : 0x00ffff00;                          // YELLOW
+      var apts = shapePerimeterPoints( s,
+                                       s.type === "ellipse" ? 96 : 4 );
+      bmpStrokeClosedPath( bmp, apts, aShadow, 5, false );
+      bmpStrokeClosedPath( bmp, apts, aMain,   2, false );
+
+      // Inner "core" contour (dashed): shows where the solid mask=1
+      // zone ends inside an ellipse with feather > 0.
+      var gcShape = (s.gradientCenter != null)
+                  ? s.gradientCenter : data.maskGradientCtr;
+      if ( s.type === "ellipse" && gcShape < 0.99
+        && gcShape * Math.min( s.rx, s.ry ) >= 2.0 )
+      {
+         var coreS = {
+            type: "ellipse",
+            cx: s.cx, cy: s.cy,
+            rx: s.rx * gcShape, ry: s.ry * gcShape,
+            angle: s.angle,
+            feather: s.feather,
+            gradientCenter: s.gradientCenter
+         };
+         var cppts = shapePerimeterPoints( coreS, 64 );
+         bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
+         bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
+      }
+
+      // Handles: 4 corner resize + 1 rotation handle above the top.
+      // Sizes are in IMAGE/bitmap coords, so they scale with zoom.
+      // Tuned to be visible at typical preview sizes (800-1900 px).
+      var hFill = aMain;
+      var hBord = 0x00ffffff;                            // white border
+      var rFill = 0x0000ff00;                            // green rotate
+      var handles = getActiveShapeHandles();
+      var co = Math.cos( s.angle ), si = Math.sin( s.angle );
+      var hHalf = Math.max( 4, Math.round( bmp.width / 200 ) );
+      var hRad  = Math.max( 6, Math.round( bmp.width / 160 ) );
+      for ( var h = 0; h < handles.length; ++h )
+      {
+         var hx = Math.round( handles[h].x );
+         var hy = Math.round( handles[h].y );
+         if ( handles[h].mode === "rotate" )
+         {
+            // Stem from shape's top center to rotation handle.
+            var topWx = s.cx + 0 * co - (-s.ry) * si;
+            var topWy = s.cy + 0 * si + (-s.ry) * co;
+            bmpThickLine( bmp, topWx, topWy, hx, hy, aShadow, 3 );
+            bmpThickLine( bmp, topWx, topWy, hx, hy, rFill,   1 );
+            bmpFillCircle( bmp, hx, hy, hRad, rFill, hBord );
+         }
+         else
+         {
+            bmpFillRect( bmp, hx, hy, hHalf, hFill, hBord );
+         }
+      }
+   }
+}
+
+// Re-render the current preview source image to a Bitmap, stamp shape
+// outlines onto it, and push it to the preview frame. Used by mouse
+// handlers to refresh outlines instantly during shape drag without
+// rerunning the (expensive) combine pipeline.
+function refreshPreviewWithOutlines()
+{
+   if ( ui == null || ui.previewFrame == null ) return;
+   if ( data.lastPreviewSrcImg == null )
+   {
+      ui.previewFrame.repaint();
+      return;
+   }
+   try {
+      var bmp = data.lastPreviewSrcImg.render();
+      stampShapeOutlinesOnBitmap( bmp );
+      ui.previewFrame.setBitmap( bmp );
+   } catch ( e ) {
+      console.warningln( "* refreshPreviewWithOutlines: " + e.message );
+   }
+}
+
 // ---------------------------------------------------------------------
 // Graphics-based outline renderers (NO intermediate Bitmap).
 //
@@ -1923,7 +2106,9 @@ function updatePreview()
       {
          // Show the starless as-is (no processing needed).
          var slOnlyIm = data.starlessSmall.mainView.image;
+         data.lastPreviewSrcImg = slOnlyIm;
          var slOnlyBmp = slOnlyIm.render();
+         stampShapeOutlinesOnBitmap( slOnlyBmp );
          logSetBitmap( "single-starless", slOnlyIm, slOnlyBmp );
          ui.previewFrame.setBitmap( slOnlyBmp );
          return;
@@ -1943,7 +2128,9 @@ function updatePreview()
             if ( data.removeMagenta ) applyMagentaRemoval( data.starsProc.mainView );
          }
          var stProcIm  = data.starsProc.mainView.image;
+         data.lastPreviewSrcImg = stProcIm;
          var stProcBmp = stProcIm.render();
+         stampShapeOutlinesOnBitmap( stProcBmp );
          logSetBitmap( "single-stars", stProcIm, stProcBmp );
          ui.previewFrame.setBitmap( stProcBmp );
          return;
@@ -1995,7 +2182,9 @@ function updatePreview()
       }
 
       var pvIm  = data.previewSmall.mainView.image;
+      data.lastPreviewSrcImg = pvIm;
       var bmp   = pvIm.render();
+      stampShapeOutlinesOnBitmap( bmp );
 
       // Always-on diagnostic for the "black preview" hunt.
       var tag = (data.viewMode === "mask") ? "mask" :
@@ -2395,178 +2584,19 @@ function PreviewFrame( parent )
          // the actual masked output with the View=Result mode or the
          // Compare button.
 
-         // Active shape (editable): outline + handles. Drawn on top of
-         // any overlay so the user can always see and grab it. Only
-         // shown for the geometric tools (ellipse / rect).
-         if ( data.activeShape != null
-           && (data.maskTool === "ellipse" || data.maskTool === "rect") )
-         {
-            var s = data.activeShape;
-            // Build polygon points around the shape's local rim.
-            var pts = [];
-            var N = 64;
-            var co = Math.cos( s.angle );
-            var si = Math.sin( s.angle );
-            if ( s.type === "ellipse" )
-            {
-               for ( var i = 0; i < N; ++i )
-               {
-                  var th = (i / N) * 2 * Math.PI;
-                  var lx = s.rx * Math.cos( th );
-                  var ly = s.ry * Math.sin( th );
-                  var wx = s.cx + lx * co - ly * si;
-                  var wy = s.cy + lx * si + ly * co;
-                  var cp = self._imageRectToCanvas( wx, wy, wx, wy );
-                  pts.push( new Point( cp.x0, cp.y0 ) );
-               }
-            }
-            else
-            {
-               var local = [ [-s.rx, -s.ry], [s.rx, -s.ry],
-                             [ s.rx,  s.ry], [-s.rx,  s.ry] ];
-               for ( var k = 0; k < 4; ++k )
-               {
-                  var lx2 = local[k][0], ly2 = local[k][1];
-                  var wx2 = s.cx + lx2 * co - ly2 * si;
-                  var wy2 = s.cy + lx2 * si + ly2 * co;
-                  var cp2 = self._imageRectToCanvas( wx2, wy2, wx2, wy2 );
-                  pts.push( new Point( cp2.x0, cp2.y0 ) );
-               }
-            }
-            // Render shape outline + handles DIRECTLY on the Graphics
-            // via g.fillRect with a Brush. We used to render onto a
-            // canvas-sized ARGB32 Bitmap and then drawBitmap it, but in
-            // some PJSR builds new Bitmap(w,h) defaults to RGB32 (no
-            // alpha), so fill(0) produces an opaque-black overlay that
-            // turns the entire preview area black on top. fillRect with
-            // Brush is verified to work in this build (the dialog grey
-            // fill at the start of onPaint paints fine).
-            if ( DEBUG_PREVIEW )
-               console.writeln(
-                  "[paint] drawing active shape outline via gfx fillRect" );
-
-            // ARGB color literals with alpha >= 0x80 become > 2^31 in
-            // JavaScript and PJSR's Brush color setter sanitizes them
-            // to opaque black. Stay in the positive int32 range with
-            // alpha 0x7f. Yellow + black shadow gives strong contrast
-            // on both bright nebulae and dark sky backgrounds (red
-            // tends to blend with red nebulosity; black alone blends
-            // with dark space).
-            var shadowColor = argb( 0x7f, 0, 0, 0 );           // black
-            var mainColor   = data.maskInvert
-                            ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
-                            : argb( 0x7f, 0xff, 0xff, 0x00 );  // YELLOW
-
-            // Main outline: shadow + colored stroke.
-            gfxStrokeClosedPath( g, pts, shadowColor, 4, false );
-            gfxStrokeClosedPath( g, pts, mainColor,   2, false );
-
-            // Inner "core" contour (dashed).
-            var gcShape = (s.gradientCenter != null)
-                        ? s.gradientCenter : data.maskGradientCtr;
-            if ( s.type === "ellipse" && gcShape < 0.99
-              && gcShape * Math.min( s.rx, s.ry ) >= 1.0 )
-            {
-               var corePts = [];
-               for ( var ci = 0; ci < N; ++ci )
-               {
-                  var cth = (ci / N) * 2 * Math.PI;
-                  var clx = s.rx * gcShape * Math.cos( cth );
-                  var cly = s.ry * gcShape * Math.sin( cth );
-                  var cwx = s.cx + clx * co - cly * si;
-                  var cwy = s.cy + clx * si + cly * co;
-                  var ccp = self._imageRectToCanvas( cwx, cwy, cwx, cwy );
-                  corePts.push( new Point( ccp.x0, ccp.y0 ) );
-               }
-               gfxStrokeClosedPath( g, corePts, shadowColor, 3, true );
-               gfxStrokeClosedPath( g, corePts, mainColor,   1, true );
-            }
-
-            // Draw the 4 corner handles + the rotation handle.
-            // Alpha 0x7f to stay in positive int32 (see shadowColor
-            // comment above) so the Brush honors the requested color.
-            var handles = getActiveShapeHandles();
-            var handleFill    = data.maskInvert
-                              ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
-                              : argb( 0x7f, 0xff, 0xff, 0x00 );  // yellow
-            var handleOutline = argb( 0x7f, 0x00, 0x00, 0x00 );  // black border
-            var rotFill       = argb( 0x7f, 0x00, 0xff, 0x00 );  // green
-            var rotOutline    = argb( 0x7f, 0x00, 0x00, 0x00 );  // black border
-
-            for ( var h = 0; h < handles.length; ++h )
-            {
-               var hc = self._imageRectToCanvas(
-                  handles[h].x, handles[h].y,
-                  handles[h].x, handles[h].y );
-               var hx = Math.round( hc.x0 ), hy = Math.round( hc.y0 );
-
-               if ( handles[h].mode === "rotate" )
-               {
-                  // Stem connecting handle to the top center of the shape.
-                  var localTopX = 0, localTopY = -s.ry;
-                  var topWx = s.cx + localTopX * co - localTopY * si;
-                  var topWy = s.cy + localTopX * si + localTopY * co;
-                  var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
-                  var rotBrush = makeBrush( rotFill );
-                  gfxThickLine( g, topC.x0, topC.y0, hx, hy, rotBrush, 2 );
-                  gfxFillCircleHandle( g, hx, hy, 8, rotFill, rotOutline );
-               }
-               else
-               {
-                  gfxFillRectHandle( g, hx, hy, 5, handleFill, handleOutline );
-               }
-            }
-         }
-
-         // Thin outlines for each COMMITTED shape (no handles). Lets the
-         // user see where their committed shapes sit on top of the
-         // preview without needing a separate red tint overlay (which
-         // had unreliable compositing in this PJSR build - see note
-         // above). Skipped in "mask" view because the mask itself is
-         // already the preview content.
-         if ( data.shapes.length > 0 && data.viewMode !== "mask"
-           && data.maskTool !== "pan" )
-         {
-            var committedShadow = argb( 0x7f, 0, 0, 0 );      // black
-            var committedColor  = data.maskInvert
-                                ? argb( 0x7f, 0x00, 0xff, 0xff )   // cyan
-                                : argb( 0x7f, 0xff, 0x80, 0x00 );  // orange
-            for ( var sIdx = 0; sIdx < data.shapes.length; ++sIdx )
-            {
-               var cs = data.shapes[ sIdx ];
-               var cco = Math.cos( cs.angle );
-               var csi = Math.sin( cs.angle );
-               var cpts = [];
-               if ( cs.type === "ellipse" )
-               {
-                  for ( var ci2 = 0; ci2 < 48; ++ci2 )
-                  {
-                     var cth2 = (ci2 / 48) * 2 * Math.PI;
-                     var clx2 = cs.rx * Math.cos( cth2 );
-                     var cly2 = cs.ry * Math.sin( cth2 );
-                     var cwx2 = cs.cx + clx2 * cco - cly2 * csi;
-                     var cwy2 = cs.cy + clx2 * csi + cly2 * cco;
-                     var ccp2 = self._imageRectToCanvas( cwx2, cwy2, cwx2, cwy2 );
-                     cpts.push( new Point( ccp2.x0, ccp2.y0 ) );
-                  }
-               }
-               else // rect
-               {
-                  var rlocal = [ [-cs.rx, -cs.ry], [cs.rx, -cs.ry],
-                                 [ cs.rx,  cs.ry], [-cs.rx,  cs.ry] ];
-                  for ( var rk = 0; rk < 4; ++rk )
-                  {
-                     var rlx = rlocal[rk][0], rly = rlocal[rk][1];
-                     var rwx = cs.cx + rlx * cco - rly * csi;
-                     var rwy = cs.cy + rlx * csi + rly * cco;
-                     var rcp = self._imageRectToCanvas( rwx, rwy, rwx, rwy );
-                     cpts.push( new Point( rcp.x0, rcp.y0 ) );
-                  }
-               }
-               gfxStrokeClosedPath( g, cpts, committedShadow, 2, false );
-               gfxStrokeClosedPath( g, cpts, committedColor,  1, false );
-            }
-         }
+         // NOTE: Active shape + committed shape outlines used to be
+         // rendered here via Graphics primitives (gfxStrokeClosedPath,
+         // etc.). In this PJSR build those primitives ignore the
+         // requested color and paint solid opaque black, so the user
+         // saw a black ellipse no matter what color we asked for.
+         //
+         // Since v1.1.42 the outlines are stamped DIRECTLY into the
+         // rendered preview bitmap via Bitmap.setPixel (the only
+         // primitive that honours colour) before setBitmap is called -
+         // see stampShapeOutlinesOnBitmap() above. onPaint just
+         // drawScaledBitmap's whatever is in self.bitmap, so when the
+         // shape is dragged we call refreshPreviewWithOutlines() from
+         // the mouse handlers to re-render + re-stamp + setBitmap.
 
          // Real-time brush / eraser trail. While the user is dragging
          // a brush or eraser stroke, render each dab as a translucent
@@ -2791,7 +2821,7 @@ function PreviewFrame( parent )
             angle:  data.activeShape.angle
          };
          self._cursorImg = p;
-         self.repaint();
+         refreshPreviewWithOutlines();
          return;
       }
 
@@ -2799,14 +2829,15 @@ function PreviewFrame( parent )
       {
          // Click missed the existing shape -> commit it into the
          // persistent mask and hide the editor. The user's mask
-         // remains applied (visible as the red tint overlay) but the
-         // handles/outline disappear so the preview is uncluttered.
-         // A subsequent click will start a NEW shape.
+         // remains applied (now shown as a thin orange outline) but
+         // the handles/outline of the in-progress shape disappear so
+         // the preview is uncluttered. A subsequent click starts a
+         // NEW shape.
          commitActiveShape();
          rebuildMaskOverlay();
          updateCommitButton();
          scheduleUpdate();
-         self.repaint();
+         refreshPreviewWithOutlines();
          return;
       }
 
@@ -2837,7 +2868,7 @@ function PreviewFrame( parent )
 
       updateCommitButton();
       scheduleUpdate();
-      self.repaint();
+      refreshPreviewWithOutlines();
    };
 
    this.onMouseMove = function( x, y, buttons, modifiers )
@@ -2969,8 +3000,23 @@ function PreviewFrame( parent )
          }
       }
 
-      if ( data.maskTool !== "pan" )
+      // Refresh outlines on every move that touches an active shape
+      // (drag / resize / rotate) OR while the user is hovering with a
+      // geometric tool selected (so handle hover cues still appear).
+      // Brush tool keeps the cheap self.repaint() because the brush
+      // trail is drawn directly in onPaint.
+      if ( data.maskTool === "pan" )
+      {
+         // nothing to repaint; pan repaints inline in its branch above.
+      }
+      else if ( data.maskTool === "brush" || data.maskTool === "eraser" )
+      {
          self.repaint();
+      }
+      else
+      {
+         refreshPreviewWithOutlines();
+      }
    };
 
    this.onMouseRelease = function( x, y, button, buttons, modifiers )

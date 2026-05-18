@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.49"
+#define VERSION       "1.1.50"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1510,37 +1510,73 @@ function shapePerimeterPoints( s, N )
    return pts;
 }
 
-// True parallel / offset curve of an ellipse: for each of N samples
-// along the perimeter, take the local outward normal (the implicit
-// ellipse function f(P) = (Px/rx)^2 + (Py/ry)^2 has gradient
-// (2Px/rx^2, 2Py/ry^2), which is normal to the perimeter), normalise
-// it, and step INWARD by insetDist pixels. Unlike a uniformly scaled
-// ellipse, the resulting curve maintains a constant perpendicular
-// distance from the original perimeter - exactly what the user wants
-// the dashed inner core indicator to look like.
-function ellipseOffsetCurve( s, insetDist, N )
+// Per-point-clamped offset curve of an ellipse. Walks N samples along
+// the perimeter and, at each one, steps INWARD along the local outward
+// normal by `desiredInset` pixels - BUT first caps the per-point inset
+// against the local radius of curvature so the offset curve never
+// self-intersects.
+//
+// Background: a uniform offset of an ellipse folds into a bow-tie /
+// hourglass shape wherever the requested inset exceeds the local
+// radius of curvature R(t). For an ellipse with semi-axes a >= b the
+// minimum radius of curvature is b^2/a at the end of the major axis.
+// If we apply that cap GLOBALLY the curve stops responding to the
+// slider past a certain point (the user's "the inner ellipse stops
+// shrinking" bug). Per-point clamping keeps the slider responsive
+// everywhere: along the low-curvature minor-axis ends the curve
+// continues to shrink, while the high-curvature major-axis ends stop
+// at their natural geometric limit. The result is a smooth, non-
+// self-intersecting curve that shrinks asymmetrically (which is the
+// best a true offset curve can do for an elongated ellipse).
+function ellipseOffsetCurve( s, desiredInset, N )
 {
    var pts = [];
-   var co  = Math.cos( s.angle );
-   var si  = Math.sin( s.angle );
-   var rx2 = s.rx * s.rx;
-   var ry2 = s.ry * s.ry;
+   var co   = Math.cos( s.angle );
+   var si   = Math.sin( s.angle );
+   var rx   = s.rx;
+   var ry   = s.ry;
+   var rx2  = rx * rx;
+   var ry2  = ry * ry;
+   var rxry = rx * ry;
    for ( var i = 0; i < N; ++i )
    {
-      var t  = (i / N) * 2 * Math.PI;
-      var lx = s.rx * Math.cos( t );
-      var ly = s.ry * Math.sin( t );
-      // Implicit-form gradient -> outward normal direction.
+      var t   = (i / N) * 2 * Math.PI;
+      var ct  = Math.cos( t );
+      var st  = Math.sin( t );
+      var lx  = rx * ct;
+      var ly  = ry * st;
+      // Local radius of curvature at parameter t:
+      //   R(t) = (rx^2 sin^2 t + ry^2 cos^2 t)^(3/2) / (rx*ry)
+      var rho   = rx2 * st * st + ry2 * ct * ct;
+      var Rcurv = Math.pow( rho, 1.5 ) / rxry;
+      // Distance from center to this perimeter point (so we never
+      // step past the center along this normal direction).
+      var distToCtr = Math.sqrt( lx * lx + ly * ly );
+      // Per-point safe inset: tightest of (user request, geometric
+      // curvature limit, distance to center).
+      var safeInset = Math.min(
+         desiredInset,
+         Rcurv     - 1,
+         distToCtr - 1
+      );
+      if ( safeInset < 0 ) safeInset = 0;
+      // Outward unit normal from gradient of (Px/rx)^2 + (Py/ry)^2.
       var nx = lx / rx2;
       var ny = ly / ry2;
-      var nlen = Math.sqrt( nx*nx + ny*ny );
-      if ( nlen < 1e-9 ) continue;
+      var nlen = Math.sqrt( nx * nx + ny * ny );
+      if ( nlen < 1e-9 )
+      {
+         pts.push( {
+            x: s.cx + lx * co - ly * si,
+            y: s.cy + lx * si + ly * co
+         } );
+         continue;
+      }
       nx /= nlen;
       ny /= nlen;
-      // Move inward by insetDist along the unit normal.
-      var ix = lx - nx * insetDist;
-      var iy = ly - ny * insetDist;
-      // Rotate from the ellipse's local frame back to bitmap coords.
+      // Step inward by the per-point safe inset.
+      var ix = lx - nx * safeInset;
+      var iy = ly - ny * safeInset;
       pts.push( {
          x: s.cx + ix * co - iy * si,
          y: s.cy + ix * si + iy * co
@@ -1606,28 +1642,23 @@ function stampShapeOutlinesOnBitmap( bmp )
       // Inner "core" contour (dashed): visual guide for the solid
       // mask=1 zone inside an ellipse with feather > 0.
       //
-      // The inset is now a TRUE offset curve (constant perpendicular
-      // distance from the outer perimeter). It can fold on itself when
-      // the inset exceeds the local radius of curvature; for an
-      // ellipse with semi-axes a >= b the smallest radius of curvature
-      // is b^2/a at the end of the major axis. We cap the inset below
-      // that limit so the curve never self-intersects.
+      // The inset is computed as (1 - gc) * rx (NOT capped against
+      // minR or minCurvature here); ellipseOffsetCurve handles the
+      // per-point geometric clamping internally so the slider stays
+      // responsive at every position without the curve folding.
+      //
+      // Using rx (the major axis) instead of min(rx, ry) maps the
+      // slider to a wider range of insets for elongated ellipses, so
+      // the user actually sees the inner curve shrink all the way
+      // toward the centre as the gradient drops to 0%.
       var gcShape = (s.gradientCenter != null)
                   ? s.gradientCenter : data.maskGradientCtr;
       if ( s.type === "ellipse" && gcShape < 0.99 )
       {
-         var minR     = Math.min( s.rx, s.ry );
-         var maxR     = Math.max( s.rx, s.ry );
-         var minCurv  = (minR * minR) / maxR;     // tightest radius of curvature
-         var sliderInset = (1 - gcShape) * minR;
-         var insetPx  = Math.min(
-            sliderInset,         // what the user asked for
-            minR - 2,            // never collapse past the centre
-            minCurv - 1          // never fold the offset curve
-         );
-         if ( insetPx >= 2 )
+         var desiredInset = (1 - gcShape) * Math.max( s.rx, s.ry );
+         if ( desiredInset >= 1 )
          {
-            var cppts = ellipseOffsetCurve( s, insetPx, 96 );
+            var cppts = ellipseOffsetCurve( s, desiredInset, 96 );
             bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
             bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
          }

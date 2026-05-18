@@ -21,42 +21,54 @@
       <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.1.52.tar.gz"
-               sha1="55ba24ff381655dbbba09f9a2542506668c17f57"
+      <package fileName="pkg/AstroDL-StarRecompose-1.2.0.tar.gz"
+               sha1="ed19fb05967a9facd98739725d2a464264c0ea9d"
                type="script"
                releaseDate="20260518">
          <title>Star Recompose Pro</title>
          <description>
-            <p><b>Star Recompose Pro</b> recomposes a stretched starless
-            image with a linear stars-only image and produces a single
-            combined output, while you preview the result in real time.</p>
+            <p><b>Star Recompose Pro v1.2.0</b> &mdash; first stable
+            release.</p>
+            <p>Recomposes a stretched starless image with a linear
+            stars-only image and produces a single combined output,
+            previewing the result in real time as you tune the
+            controls.</p>
             <p><b>Features</b></p>
             <ul>
-               <li>Live embedded preview with mouse-wheel zoom and
-                   click-drag pan</li>
+               <li>Live embedded preview. Mouse-wheel zoom, click-drag
+                   pan with the Pan tool, custom cursors for every
+                   editing action.</li>
                <li>Loads either layer first and previews it immediately;
-                   composites automatically once both are selected</li>
-               <li>Single intensity slider for the stars stretch plus an
-                   independent color-saturation boost</li>
-               <li>Optional green and / or magenta color-cast cleanup
-                   on the stars layer</li>
+                   composites automatically once both views are
+                   selected.</li>
+               <li>Single intensity slider for the stars stretch plus
+                   an independent color-saturation boost.</li>
+               <li>Optional SCNR Green and / or SCNR Magenta on the
+                   stars layer to clean up residual color casts.</li>
                <li>Optional ellipse mask to limit the stars stretch to
-                   a region (e.g. only outside a galaxy or nebula core).
-                   Drag the corner handles to resize, the green handle
-                   to rotate. The outline tracks the cursor in real time
-                   and the shape stays anchored across window resizes</li>
+                   a region (e.g. only outside a galaxy or nebula
+                   core). Click and drag to place; drag the corner
+                   handles to resize; drag the green handle to rotate.
+                   The shape stays anchored across window resizes.</li>
                <li>Configurable mask strength, soft-edge feather, and
-                   gradient-core radius</li>
+                   gradient-core radius. The inner core curve shrinks
+                   smoothly across the full slider range without ever
+                   self-intersecting, even on highly elongated
+                   ellipses.</li>
                <li>Invert mode keeps stars only inside the ellipse and
-                   removes them everywhere else</li>
+                   removes them everywhere else (outline shows in cyan
+                   in this mode).</li>
                <li>Three preview modes: image only, image with mask
-                   effect, or mask alone in black &amp; white</li>
+                   effect (matches what Apply will produce), or mask
+                   alone in black and white.</li>
                <li>One-click Compare button to flip between with /
-                   without the mask applied</li>
-               <li>Optional second output: the stretched stars layer on
-                   its own (useful as a separate layer in Photoshop / GIMP)</li>
-               <li>Save current settings as a process icon for one-click
-                   reuse on future images</li>
+                   without the mask applied.</li>
+               <li>Optional second output: the stretched stars layer
+                   on its own, useful as a separate layer in Photoshop
+                   or GIMP.</li>
+               <li>Drag the New Instance triangle (bottom-left) to the
+                   workspace to save the current slider values as a
+                   process icon for one-click reuse on future images.</li>
             </ul>
             <p>MIT License. Free for personal and commercial use.</p>
          </description>

@@ -6,7 +6,7 @@
 > ellipse mask to limit the stars stretch to a region of the frame.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/github/v/tag/luisjosedl/pi-star-recompose?label=version&color=brightgreen&sort=semver)](https://github.com/luisjosedl/pi-star-recompose/tags)
+[![Version](https://img.shields.io/github/v/release/luisjosedl/pi-star-recompose?display_name=tag&color=brightgreen)](https://github.com/luisjosedl/pi-star-recompose/releases/latest)
 
 ## What it does
 

@@ -68,7 +68,7 @@
 #define BRAND         "AstroDL"
 #define TOOL          "Star Recompose"
 #define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.25"
+#define VERSION       "1.1.26"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -103,16 +103,15 @@
 #define BRUSH_RADIUS_DEF     5.0      // percent of image width
 #define GRADIENT_CENTER_DEF  1.0      // 0..1 (slider shows it as %)
 
-// Slider ranges. STRETCH maps DIRECTLY to ArcsinhStretch.stretch (no
-// hidden formula). BLACK_POINT maps to ArcsinhStretch.blackPoint.
-// BOOST is a multiplier for our own ColorSaturation hat-curve.
+// Slider ranges. STRETCH is the rational-stretch coefficient K in
+//   y = (K * x) / ((K - 1) * x + 1)
+// K=1 means no stretch, K large means an increasingly aggressive
+// stretch concentrated in the dark end of the range (the bright cores
+// are protected by the curve flattening out near x=1).
+// BOOST is a multiplier for our ColorSaturation hat-curve.
 #define STRETCH_MIN   1.0
 #define STRETCH_MAX   1000.0
-#define STRETCH_DEF   200.0
-
-#define BLACK_MIN     0.0
-#define BLACK_MAX     0.05
-#define BLACK_DEF     0.0
+#define STRETCH_DEF   100.0
 
 #define BOOST_MIN     0.0
 #define BOOST_MAX     2.0
@@ -130,11 +129,9 @@ function CombinerData()
    this.previewSmall  = null;
 
    this.stretchIntensity = STRETCH_DEF;
-   this.blackPoint       = BLACK_DEF;
    this.colorBoost       = BOOST_DEF;
    this.removeGreen      = false;
    this.removeMagenta    = false;
-   this.perChannelStretch = true;   // per-channel ArcsinhStretch (more colorful)
    this.outputId         = "Combined";
    this.keepStars        = false;
    this.starsOutputId    = "Stars_Stretched";
@@ -170,11 +167,9 @@ function CombinerData()
    this.save = function()
    {
       Parameters.set( "stretchIntensity",  this.stretchIntensity );
-      Parameters.set( "blackPoint",        this.blackPoint );
       Parameters.set( "colorBoost",        this.colorBoost );
       Parameters.set( "removeGreen",       this.removeGreen );
       Parameters.set( "removeMagenta",     this.removeMagenta );
-      Parameters.set( "perChannelStretch", this.perChannelStretch );
       Parameters.set( "outputId",          this.outputId );
       Parameters.set( "keepStars",        this.keepStars );
       Parameters.set( "starsOutputId",    this.starsOutputId );
@@ -187,16 +182,12 @@ function CombinerData()
    {
       if ( Parameters.has( "stretchIntensity" ) )
          this.stretchIntensity = Parameters.getReal( "stretchIntensity" );
-      if ( Parameters.has( "blackPoint" ) )
-         this.blackPoint = Parameters.getReal( "blackPoint" );
       if ( Parameters.has( "colorBoost" ) )
          this.colorBoost = Parameters.getReal( "colorBoost" );
       if ( Parameters.has( "removeGreen" ) )
          this.removeGreen = Parameters.getBoolean( "removeGreen" );
       if ( Parameters.has( "removeMagenta" ) )
          this.removeMagenta = Parameters.getBoolean( "removeMagenta" );
-      if ( Parameters.has( "perChannelStretch" ) )
-         this.perChannelStretch = Parameters.getBoolean( "perChannelStretch" );
       if ( Parameters.has( "outputId" ) )
          this.outputId = Parameters.getString( "outputId" );
       if ( Parameters.has( "keepStars" ) )
@@ -469,24 +460,41 @@ function copyInto( srcId, destView )
    destView.endProcess();
 }
 
-// 2. ArcsinhStretch (PixInsight native, based on Lupton et al. 1999):
-//    y = asinh(stretch * x) / asinh(stretch)
-//    With useRgbws=true and protectHighlights=true so star colors are
-//    preserved instead of being clipped to white. The UI intensity is
-//    passed directly to ArcsinhStretch.stretch with no scaling.
-function applyArcsinh( view, intensity, blackPoint, perChannel )
+// 2. Rational stretch via PixelMath, applied independently per RGB
+//    channel (so bright stars keep their distinct colors - blue, yellow,
+//    orange stars stand out).
+//
+//    Formula:  y = (K * x) / ((K - 1) * x + 1)
+//
+//    This is a one-parameter Mobius transformation. It is mathematically
+//    identical to PixInsight's MidtonesTransferFunction with a specific
+//    midtones value, and to the "rational" stretches widely used in
+//    astrophotography (Lodriguss, Marek, etc). The math itself is not
+//    copyrightable - it has been used in tone-mapping since the 1970s.
+//
+//    Behavior:
+//      K = 1     no stretch (y = x)
+//      K = 100   typical default (good for moderately stretched stars)
+//      K = 1000  very aggressive (blows out bright cores)
+//
+//    Per-channel application gives the punchy, colorful look users
+//    typically want for stars layers.
+function applyStretch( view, K )
 {
-   var AS = new ArcsinhStretch;
-   AS.stretch              = intensity;
-   AS.blackPoint           = blackPoint;
-   AS.protectHighlights    = true;
-   // useRgbws=true preserves color ratios (gentler, more "luminance"
-   // looking). useRgbws=false runs the stretch on each RGB channel
-   // independently, which produces more saturated star colors (this
-   // is what Marek's Star Stretch does, and matches what users
-   // typically expect from a "punchy" star stretch).
-   AS.useRgbws             = !perChannel;
-   AS.executeOn( view, false );
+   if ( K < 1.001 ) return;     // K = 1 is identity
+   var pm = new PixelMath;
+   pm.expression = "(" + K.toFixed( 4 ) + "*$T)/((" +
+                   (K - 1).toFixed( 4 ) + ")*$T+1)";
+   pm.useSingleExpression = true;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( view, false );
 }
 
 // 3. ColorSaturation hat-curve (AstroDL values, no third-party IP).
@@ -1442,8 +1450,7 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
                      isColor, useMask )
 {
    copyInto( starsSrcId, procView );
-   applyArcsinh( procView, data.stretchIntensity, data.blackPoint,
-                 data.perChannelStretch );
+   applyStretch( procView, data.stretchIntensity );
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
@@ -1582,8 +1589,7 @@ function applyFinal()
       // Copy stars at full res into the temp window and run the stretch
       // pipeline on it (operates in-place).
       copyInto( data.starsView.id, tw.mainView );
-      applyArcsinh( tw.mainView, data.stretchIntensity, data.blackPoint,
-                    data.perChannelStretch );
+      applyStretch( tw.mainView, data.stretchIntensity );
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
@@ -2583,17 +2589,17 @@ function CombinerDialog()
 
    this.resetBtn = new PushButton( this );
    this.resetBtn.text    = "Reset";
-   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 200, Black Point 0, Boost 1, no SCNR).";
+   this.resetBtn.toolTip = "Restore AstroDL defaults (Intensity 100, Boost 1, no SCNR).";
    this.resetBtn.onClick = function()
    {
       data.stretchIntensity = STRETCH_DEF;
-      data.blackPoint       = BLACK_DEF;
       data.colorBoost       = BOOST_DEF;
       data.removeGreen      = false;
+      data.removeMagenta    = false;
       self.stretchNC.setValue( data.stretchIntensity );
-      self.blackNC.setValue( data.blackPoint );
       self.boostNC.setValue( data.colorBoost );
-      self.scnrCheck.checked = data.removeGreen;
+      self.scnrCheck.checked         = data.removeGreen;
+      self.scnrMagentaCheck.checked  = data.removeMagenta;
       scheduleUpdate();
    };
 
@@ -2615,16 +2621,22 @@ function CombinerDialog()
    this.stretchNC.setValue( data.stretchIntensity );
    this.stretchNC.edit.minWidth = 70;
    this.stretchNC.toolTip =
-      "ArcsinhStretch intensity (Lupton et al. 1999).\n" +
-      "Maps directly to ArcsinhStretch.stretch. Range 1-1000.\n" +
-      "Default 200. Lower for sparse fields, higher for faint stars.";
+      "Stretch intensity (K) of the rational stretch:\n" +
+      "    y = (K * x) / ((K - 1) * x + 1)\n" +
+      "Applied per RGB channel, so bright stars keep distinct colors.\n" +
+      "K = 1 means no stretch. Range 1-1000. Default 100.\n" +
+      "Increase for fainter stars, decrease for sparse / bright fields.";
    this.stretchNC.onValueUpdated = function( v )
    {
       data.stretchIntensity = v;
       scheduleUpdate();
    };
 
-   // ---- Black Point (0..0.05, default 0) - ArcsinhStretch.blackPoint ----
+   // Black Point control removed in v1.1.26: the new rational-stretch
+   // formula doesn't take a blackPoint parameter the way ArcsinhStretch
+   // did. The leftover block below is kept as inert dead code in case
+   // we want to bring it back via a pre-clipping step in PixelMath.
+   /*
    this.blackNC = new NumericControl( this );
    this.blackNC.label.text = "Black Point:";
    this.blackNC.label.setFixedWidth( labelWidth );
@@ -2644,6 +2656,7 @@ function CombinerDialog()
       data.blackPoint = v;
       scheduleUpdate();
    };
+   */
 
    // ---- Star Color Boost (0..2, default 1) - multiplier for sat hat-curve ----
    this.boostNC = new NumericControl( this );
@@ -2697,21 +2710,9 @@ function CombinerDialog()
       scheduleUpdate();
    };
 
-   this.perChannelCheck = new CheckBox( this );
-   this.perChannelCheck.text    = "Per-channel stretch";
-   this.perChannelCheck.checked = data.perChannelStretch;
-   this.perChannelCheck.toolTip = "Apply the ArcsinhStretch to each RGB channel " +
-                                  "independently. Produces more saturated star " +
-                                  "colors (yellow / orange / blue stars stand out), " +
-                                  "at the cost of slightly altered hue. Unchecked = " +
-                                  "luminance-based (RGB working space) stretch, " +
-                                  "preserves color ratios but stars look paler.\n" +
-                                  "Default: ON.";
-   this.perChannelCheck.onCheck = function( c )
-   {
-      data.perChannelStretch = c;
-      scheduleUpdate();
-   };
+   // Per-channel checkbox removed in v1.1.26 - the new rational-stretch
+   // pipeline is always per-channel by virtue of PixelMath operating
+   // independently on R, G, B.
 
    this.zoomOutBtn = new ToolButton( this );
    this.zoomOutBtn.text    = "-";
@@ -2741,8 +2742,6 @@ function CombinerDialog()
    scnrRow.add( this.scnrCheck );
    scnrRow.addSpacing( 8 );
    scnrRow.add( this.scnrMagentaCheck );
-   scnrRow.addSpacing( 16 );
-   scnrRow.add( this.perChannelCheck );
    scnrRow.addStretch();
    scnrRow.add( zoomLabel );
    scnrRow.addSpacing( 4 );
@@ -3150,7 +3149,7 @@ function CombinerDialog()
    this.sizer.add( slRow );
    this.sizer.add( stRow );
    this.sizer.add( this.stretchNC );
-   this.sizer.add( this.blackNC );
+   // this.sizer.add( this.blackNC );    // removed in v1.1.26
    this.sizer.add( this.boostNC );
    this.sizer.add( scnrRow );
    this.sizer.add( keepRow );

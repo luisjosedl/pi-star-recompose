@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.32"
+#define VERSION       "1.1.33"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1538,6 +1538,7 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
 // ===================== Live preview =====================
 
 var __updating = false;
+var __blackPreviewLogged = false;
 function updatePreview()
 {
    if ( __updating ) return;
@@ -1628,6 +1629,49 @@ function updatePreview()
       }
 
       var bmp = data.previewSmall.mainView.image.render();
+
+      // Diagnostic: if the combined preview comes out as a fully-black
+      // image, log what we know so we can debug the user's complaint
+      // about "everything goes black on click". One-shot per session
+      // to avoid console spam.
+      if ( !__blackPreviewLogged && data.viewMode !== "mask" )
+      {
+         var im0 = data.previewSmall.mainView.image;
+         var s1 = im0.sample( Math.floor( im0.width  * 0.25 ),
+                              Math.floor( im0.height * 0.25 ), 0 );
+         var s2 = im0.sample( Math.floor( im0.width  * 0.75 ),
+                              Math.floor( im0.height * 0.75 ), 0 );
+         var s3 = im0.sample( Math.floor( im0.width  * 0.5  ),
+                              Math.floor( im0.height * 0.5  ), 0 );
+         if ( s1 < 0.001 && s2 < 0.001 && s3 < 0.001 )
+         {
+            __blackPreviewLogged = true;
+            console.show();
+            console.warningln( "* AstroDL: preview is fully black after combine." );
+            console.writeln( "  viewMode = " + data.viewMode +
+                             ", activeShape = " + (data.activeShape != null) +
+                             ", maskStrength = " + data.maskStrength );
+            if ( data.starlessSmall != null )
+            {
+               var sl = data.starlessSmall.mainView.image;
+               console.writeln( "  starlessSmall " + sl.width + "x" + sl.height +
+                                " ch=" + sl.numberOfChannels +
+                                " sample(0.5,0.5,0)=" +
+                                sl.sample( Math.floor(sl.width*0.5),
+                                           Math.floor(sl.height*0.5), 0 ).toFixed( 4 ) );
+            }
+            if ( data.starsSmall != null )
+            {
+               var st = data.starsSmall.mainView.image;
+               console.writeln( "  starsSmall " + st.width + "x" + st.height +
+                                " ch=" + st.numberOfChannels +
+                                " sample(0.5,0.5,0)=" +
+                                st.sample( Math.floor(st.width*0.5),
+                                           Math.floor(st.height*0.5), 0 ).toFixed( 4 ) );
+            }
+         }
+      }
+
       ui.previewFrame.setBitmap( bmp );
    }
    catch ( e )
@@ -2588,7 +2632,8 @@ function CombinerDialog()
    ui = this;
    var self = this;
    // Width of the longest label + a small padding so all colons line up.
-   var labelWidth = this.font.width( "Remove Green via SCNR:" ) + 4;
+   // Use a shorter reference label so the left column is more compact.
+   var labelWidth = this.font.width( "Color Boost:" ) + 4;
 
    this.windowTitle   = TITLE + " v" + VERSION + " - " + BRAND;
    this.userResizable = true;
@@ -2703,7 +2748,7 @@ function CombinerDialog()
 
    // ---- Stretch Intensity (1..1000, linear, default 200) ----
    this.stretchNC = new NumericControl( this );
-   this.stretchNC.label.text = "Stretch Intensity:";
+   this.stretchNC.label.text = "Stretch:";
    this.stretchNC.label.setFixedWidth( labelWidth );
    this.stretchNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    this.stretchNC.setRange( STRETCH_MIN, STRETCH_MAX );
@@ -2752,7 +2797,7 @@ function CombinerDialog()
 
    // ---- Star Color Boost (0..2, default 1) - multiplier for sat hat-curve ----
    this.boostNC = new NumericControl( this );
-   this.boostNC.label.text = "Star Color Boost:";
+   this.boostNC.label.text = "Color Boost:";
    this.boostNC.label.setFixedWidth( labelWidth );
    this.boostNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    this.boostNC.setRange( BOOST_MIN, BOOST_MAX );
@@ -2773,7 +2818,7 @@ function CombinerDialog()
 
    // ---- SCNR row + zoom toolbar ----
    var scnrLabel = new Label( this );
-   scnrLabel.text          = "Remove via SCNR:";
+   scnrLabel.text          = "SCNR:";
    scnrLabel.setFixedWidth( labelWidth );
    scnrLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
 
@@ -2843,7 +2888,7 @@ function CombinerDialog()
 
    // ---- Save stretched stars (optional second output) ----
    var keepLabel = new Label( this );
-   keepLabel.text          = "Save stretched stars:";
+   keepLabel.text          = "Save stars:";
    keepLabel.setFixedWidth( labelWidth );
    keepLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
 
@@ -3051,7 +3096,7 @@ function CombinerDialog()
    var viewModeRow = new HorizontalSizer;
    viewModeRow.spacing = 4;
    var viewModeLabelFixed = new Label( this );
-   viewModeLabelFixed.text          = "Preview View:";
+   viewModeLabelFixed.text          = "View:";
    viewModeLabelFixed.setFixedWidth( labelWidth );
    viewModeLabelFixed.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    viewModeRow.add( viewModeLabelFixed );
@@ -3060,7 +3105,7 @@ function CombinerDialog()
 
    // Row 2: Mask Strength slider
    this.maskStrengthNC = new NumericControl( this );
-   this.maskStrengthNC.label.text          = "Mask Strength:";
+   this.maskStrengthNC.label.text          = "Strength:";
    this.maskStrengthNC.label.setFixedWidth( labelWidth );
    this.maskStrengthNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    this.maskStrengthNC.setRange( 0.0, 1.0 );
@@ -3080,7 +3125,7 @@ function CombinerDialog()
 
    // Row 3: Feather and Brush radius (both as % of image width)
    this.maskFeatherNC = new NumericControl( this );
-   this.maskFeatherNC.label.text          = "Mask Feather:";
+   this.maskFeatherNC.label.text          = "Feather:";
    this.maskFeatherNC.label.setFixedWidth( labelWidth );
    this.maskFeatherNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    this.maskFeatherNC.setRange( 0.0, 20.0 );
@@ -3133,7 +3178,7 @@ function CombinerDialog()
    // expressed as a percentage (0..100). 100% = solid until boundary
    // (default), 0% = pure radial gradient from the center.
    this.gradientCtrNC = new NumericControl( this );
-   this.gradientCtrNC.label.text          = "Gradient Center:";
+   this.gradientCtrNC.label.text          = "Gradient:";
    this.gradientCtrNC.label.setFixedWidth( labelWidth );
    this.gradientCtrNC.label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
    this.gradientCtrNC.setRange( 0.0, 100.0 );
@@ -3222,15 +3267,12 @@ function CombinerDialog()
       "This script uses PixInsight's native ArcsinhStretch as its stretch " +
       "engine. MIT License.";
 
-   // ---- Layout ----
-   // Two-column layout: compact control panel on the left, big preview
-   // frame on the right. Bottom row (Output name + Apply + Close) and
-   // credit line span the full width below.
+   // ---- Layout: compact left panel + big preview right ----
    //
-   // To make the left panel compact, slider widths are reduced so the
-   // panel doesn't dominate the dialog (the preview is what the user
-   // actually looks at while working).
-   var compactSliderW = 200;
+   // Sliders are shrunk and labels are shortened so the left column
+   // doesn't dominate the dialog. The preview is what the user
+   // looks at, so it gets the bulk of the space.
+   var compactSliderW = 150;
    var compactCtrls = [
       this.stretchNC, this.boostNC,
       this.maskStrengthNC, this.maskFeatherNC, this.gradientCtrNC
@@ -3239,33 +3281,57 @@ function CombinerDialog()
    {
       var nc = compactCtrls[ ci ];
       if ( nc && nc.slider ) nc.slider.scaledMinWidth = compactSliderW;
-      if ( nc && nc.edit ) nc.edit.minWidth = 60;
+      if ( nc && nc.edit ) nc.edit.minWidth = 50;
+   }
+
+   // Helper to create a bold section header label (numbered).
+   var self2 = this;
+   function makeSection( num, title, hint )
+   {
+      var hdr = new Label( self2 );
+      hdr.text = num + ") " + title + (hint ? "  -  " + hint : "");
+      hdr.styleSheet = "QLabel { font-weight: bold; color: #5aa6ff; " +
+                       "padding-top: 6px; }";
+      return hdr;
    }
 
    var leftPanel = new VerticalSizer;
-   leftPanel.spacing = 6;
+   leftPanel.spacing = 4;
+
+   leftPanel.add( makeSection( 1, "Images",
+                  "pick starless and stars-only views" ) );
    leftPanel.add( slRow );
    leftPanel.add( stRow );
+
+   leftPanel.add( makeSection( 2, "Stars stretch",
+                  "punch up intensity and color" ) );
    leftPanel.add( this.stretchNC );
    leftPanel.add( this.boostNC );
    leftPanel.add( scnrRow );
-   leftPanel.add( keepRow );
+
+   leftPanel.add( makeSection( 3, "Mask (optional)",
+                  "limit the stretch to a region" ) );
    leftPanel.add( maskToolRow );
    leftPanel.add( viewModeRow );
    leftPanel.add( this.maskStrengthNC );
    leftPanel.add( this.maskFeatherNC );
    leftPanel.add( this.gradientCtrNC );
-   leftPanel.addStretch();      // push controls to the top
+
+   leftPanel.add( makeSection( 4, "Output",
+                  "extra stars-only image (optional)" ) );
+   leftPanel.add( keepRow );
+
+   leftPanel.addStretch();
 
    var mainRow = new HorizontalSizer;
    mainRow.spacing = 8;
    mainRow.add( leftPanel );
-   mainRow.add( this.previewFrame, 100 );    // preview takes the rest
+   mainRow.add( this.previewFrame, 100 );
 
    this.sizer = new VerticalSizer;
    this.sizer.margin  = 8;
    this.sizer.spacing = 6;
-   this.sizer.add( mainRow, 100 );           // main row stretches vertically
+   this.sizer.add( mainRow, 100 );
    this.sizer.add( btmRow );
    this.sizer.add( this.creditLabel );
 
@@ -3344,7 +3410,7 @@ function CombinerDialog()
 
    this.adjustToContents();
    // Two-column layout: wider than tall so the preview gets room.
-   this.setMinSize( 1100, 700 );
+   this.setMinSize( 950, 650 );
 
    // ---- Preselect by name ----
    (function preselect()

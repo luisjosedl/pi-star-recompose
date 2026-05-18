@@ -52,8 +52,8 @@
  * preview stays sharp when you enlarge the window.
  ******************************************************************************/
 
-#feature-id    AstroDL > Star Recompose
-#feature-info  Recompose a stretched starless image with a linear stars-only image using an ArcsinhStretch-based engine. Live embedded preview.
+#feature-id    Astro DL Suite > Star Recompose Pro
+#feature-info  Recompose a stretched starless image with a linear stars-only image using a per-channel rational stretch. Live embedded preview, vector mask editor.
 
 #include <pjsr/Sizer.jsh>
 #include <pjsr/FrameStyle.jsh>
@@ -65,10 +65,11 @@
 #include <pjsr/UndoFlag.jsh>
 #include <pjsr/KeyCodes.jsh>
 
-#define BRAND         "AstroDL"
-#define TOOL          "Star Recompose"
-#define TITLE         "AstroDL - Star Recompose"
-#define VERSION       "1.1.26"
+#define BRAND         "Astro DL"
+#define BRAND_SUITE   "Astro DL Suite"
+#define TOOL          "Star Recompose Pro"
+#define TITLE         "Star Recompose Pro"
+#define VERSION       "1.1.27"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -513,17 +514,58 @@ function applyColorSat( view, boost )
    CS.executeOn( view, false );
 }
 
-// 4. SCNR - native PI process (Russell Croman). Removes the chosen
-// chrominance cast (Green is the most common in OSC astrophoto, but
-// Magenta also helps cameras that over-correct green).
-function applySCNR( view, channel )
+// 4a. SCNR Green - native PI process (Russell Croman). Removes the
+// green cast common to OSC astrophoto without damaging red / blue
+// stars (Green is naturally rare in deep-sky targets).
+function applySCNRGreen( view )
 {
    var P = new SCNR;
    P.amount             = 1.00;
    P.protectionMethod   = SCNR.prototype.AverageNeutral;
-   P.colorToRemove      = channel;
+   P.colorToRemove      = SCNR.prototype.Green;
    P.preserveLightness  = true;
    P.executeOn( view, false );
+}
+
+// 4b. Selective Magenta removal via PixelMath. PI's SCNR process
+// only supports R / G / B as the colorToRemove parameter; there is
+// no "Magenta" option. Worse, applying SCNR Red + SCNR Blue would
+// damage naturally red and naturally blue stars - exactly the
+// colorful stars we are trying to preserve.
+//
+// Instead we compute, per pixel:
+//   mAmount = min( max(0, R - G), max(0, B - G) )
+// This is positive only where BOTH R and B exceed G - i.e. true
+// magenta pixels. Pure red stars (R high, B low) and pure blue stars
+// (B high, R low) give mAmount = 0 and are left untouched.
+//
+// We then subtract mAmount from R and B, leaving G alone:
+//   R' = R - mAmount
+//   B' = B - mAmount
+//   G' = G
+function applyMagentaRemoval( view )
+{
+   if ( view.image.numberOfChannels < 3 ) return;     // grayscale = no-op
+   var vid = view.id;
+   var R = vid + "[0]";
+   var G = vid + "[1]";
+   var B = vid + "[2]";
+   var mAmt = "min(max(0," + R + "-" + G + "),max(0," + B + "-" + G + "))";
+
+   var pm = new PixelMath;
+   pm.useSingleExpression = false;
+   pm.expression0  = R + "-" + mAmt;
+   pm.expression1  = G;
+   pm.expression2  = B + "-" + mAmt;
+   pm.createNewImage      = false;
+   pm.generateOutput      = true;
+   pm.singleThreaded      = false;
+   pm.optimization        = true;
+   pm.rescale             = false;
+   pm.truncate            = true;
+   pm.truncateLower       = 0.0;
+   pm.truncateUpper       = 1.0;
+   pm.executeOn( view, false );
 }
 
 // Build the "effective mask" sub-expression by combining ANY of the
@@ -1110,6 +1152,30 @@ function argb( a, r, g, b )
         +  (b & 0xff);
 }
 
+// Construct a Bitmap with an explicit ARGB32 format so that fill(0)
+// gives transparent pixels (not opaque black). PJSR's default
+// `new Bitmap(w, h)` may use RGB32 (no alpha) which causes the
+// overlay bitmap to render as a solid black sheet that covers the
+// canvas - exactly the "preview goes black on shape click" bug.
+function makeAlphaBitmap( w, h )
+{
+   var bmp;
+   // Try the most likely named format constants first.
+   try { bmp = new Bitmap( w, h, BitmapFormat_ARGB32 ); }
+   catch ( e1 ) {
+      try { bmp = new Bitmap( w, h, BitmapFormat_RGBA8888 ); }
+      catch ( e2 ) {
+         // Numeric Qt::QImage::Format_ARGB32 == 5
+         try { bmp = new Bitmap( w, h, 5 ); }
+         catch ( e3 ) {
+            bmp = new Bitmap( w, h );
+         }
+      }
+   }
+   try { bmp.fill( 0x00000000 ); } catch ( ef ) {}
+   return bmp;
+}
+
 // Plot a single pixel safely (skips out-of-bounds coords).
 function plotPixel( bmp, x, y, color )
 {
@@ -1454,10 +1520,8 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
    if ( isColor )
    {
       applyColorSat( procView, data.colorBoost );
-      if ( data.removeGreen )
-         applySCNR( procView, SCNR.prototype.Green );
-      if ( data.removeMagenta )
-         applySCNR( procView, SCNR.prototype.Magenta );
+      if ( data.removeGreen )   applySCNRGreen( procView );
+      if ( data.removeMagenta ) applyMagentaRemoval( procView );
    }
    var maskId    = null, pendingId = null, activeExp = null;
    if ( useMask && data.maskStrength > 0 )
@@ -1593,10 +1657,8 @@ function applyFinal()
       if ( isColor )
       {
          applyColorSat( tw.mainView, data.colorBoost );
-         if ( data.removeGreen )
-            applySCNR( tw.mainView, SCNR.prototype.Green );
-         if ( data.removeMagenta )
-            applySCNR( tw.mainView, SCNR.prototype.Magenta );
+         if ( data.removeGreen )   applySCNRGreen( tw.mainView );
+         if ( data.removeMagenta ) applyMagentaRemoval( tw.mainView );
       }
 
       // If the user painted a raster mask, build a full-resolution
@@ -1947,8 +2009,7 @@ function PreviewFrame( parent )
             // directly via Bitmap.setPixel (which DOES honor colors,
             // as the preview itself proves).
             var cw = self.width, ch = self.height;
-            var uiBmp = new Bitmap( cw, ch );
-            uiBmp.fill( 0 );      // transparent
+            var uiBmp = makeAlphaBitmap( cw, ch );    // ARGB32, transparent
 
             // High-saturation red outline (no alpha issue: full opaque
             // is OK on Bitmap because we control the pixel values
@@ -2498,7 +2559,7 @@ function CombinerDialog()
    // Width of the longest label + a small padding so all colons line up.
    var labelWidth = this.font.width( "Remove Green via SCNR:" ) + 4;
 
-   this.windowTitle   = TITLE + " v" + VERSION;
+   this.windowTitle   = TITLE + " - v" + VERSION + " - " + BRAND;
    this.userResizable = true;
 
    // ---- Starless ViewCombo ----
@@ -3134,7 +3195,8 @@ function CombinerDialog()
 
    // Credits line (brand visibility).
    this.creditLabel = new Label( this );
-   this.creditLabel.text = BRAND + " - " + TOOL + " v" + VERSION + " - by Luis Jose DL - MIT License";
+   this.creditLabel.text = TOOL + " - v" + VERSION + " - " + BRAND
+                         + " - by Luis Jose DL - MIT License";
    this.creditLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
    this.creditLabel.styleSheet = "QLabel { color: gray; font-size: 8pt; }";
    this.creditLabel.toolTip =

@@ -51,3 +51,10 @@ these trailers automatically if they slip through.
 
 A normal patch release is therefore: edit, bump VERSION + filename,
 commit, `git tag vX.Y.Z`, push branch + tag.
+
+## README version badge
+
+The `version` badge in `README.md` reads the latest semver tag from
+GitHub via shields.io's `github/v/tag` endpoint - **do NOT hardcode
+the version number in the README**. It self-updates on every tag
+push, so a normal bump-and-tag flow is enough.

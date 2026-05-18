@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.35"
+#define VERSION       "1.1.36"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1271,6 +1271,128 @@ function bmpFillCircle( bmp, cx, cy, radius, fillColor, outlineColor )
       }
 }
 
+// ---------------------------------------------------------------------
+// Graphics-based outline renderers (NO intermediate Bitmap).
+//
+// We render the active-shape outline by issuing direct g.fillRect calls
+// on the Graphics, using a Brush per color. Some PJSR builds default
+// `new Bitmap(w, h)` to RGB32 (no alpha), so an "transparent" overlay
+// bitmap actually fills with opaque black; drawing it on top of the
+// preview then turns the entire preview area black. fillRect with a
+// Brush is verified to work in this build (it paints the dialog
+// background fine), so we use it as our rendering primitive instead.
+// ---------------------------------------------------------------------
+
+// One 1x1 pixel fill. `brush` must be a pre-built Brush of the desired
+// color so we don't allocate per pixel.
+function gfxPlot( g, x, y, brush )
+{
+   x = Math.round( x ); y = Math.round( y );
+   try { g.fillRect( new Rect( x, y, x + 1, y + 1 ), brush ); } catch ( e ) {}
+}
+
+// Bresenham thick line with a pre-built Brush.
+function gfxThickLine( g, x1, y1, x2, y2, brush, thickness )
+{
+   x1 = Math.round( x1 ); y1 = Math.round( y1 );
+   x2 = Math.round( x2 ); y2 = Math.round( y2 );
+   var dx = Math.abs( x2 - x1 ), dy = Math.abs( y2 - y1 );
+   var sx = (x1 < x2) ? 1 : -1;
+   var sy = (y1 < y2) ? 1 : -1;
+   var err = dx - dy;
+   var half = Math.max( 0, Math.floor( (thickness - 1) / 2 ) );
+   var size = (half * 2) + 1;
+   while ( true )
+   {
+      // Stamp a single square of side `size` (one fillRect, not size^2 plots).
+      try {
+         g.fillRect(
+            new Rect( x1 - half, y1 - half, x1 - half + size, y1 - half + size ),
+            brush );
+      } catch ( e ) {}
+      if ( x1 === x2 && y1 === y2 ) break;
+      var e2 = err * 2;
+      if ( e2 > -dy ) { err -= dy; x1 += sx; }
+      if ( e2 <  dx ) { err += dx; y1 += sy; }
+   }
+}
+
+// Stroke a closed polygon directly on Graphics.
+function gfxStrokeClosedPath( g, pts, color, thickness, dashed )
+{
+   if ( pts == null || pts.length < 2 ) return;
+   var brush = makeBrush( color );
+   for ( var i = 0; i < pts.length; ++i )
+   {
+      var pa = pts[i];
+      var pb = pts[ (i + 1) % pts.length ];
+      if ( !dashed )
+      {
+         gfxThickLine( g, pa.x, pa.y, pb.x, pb.y, brush, thickness );
+      }
+      else
+      {
+         var segLen = Math.sqrt( (pb.x - pa.x)*(pb.x - pa.x)
+                               + (pb.y - pa.y)*(pb.y - pa.y) );
+         var n = Math.max( 1, Math.floor( segLen / 4 ) );
+         for ( var k = 0; k < n; ++k )
+         {
+            if ( k % 2 !== 0 ) continue;     // gap
+            var t1 = k / n, t2 = (k + 1) / n;
+            gfxThickLine( g,
+               pa.x + (pb.x - pa.x) * t1, pa.y + (pb.y - pa.y) * t1,
+               pa.x + (pb.x - pa.x) * t2, pa.y + (pb.y - pa.y) * t2,
+               brush, thickness );
+         }
+      }
+   }
+}
+
+// Filled square handle with outline, on Graphics. Two fillRects total.
+function gfxFillRectHandle( g, cx, cy, halfSize, fillColor, outlineColor )
+{
+   var oBrush = makeBrush( outlineColor );
+   var fBrush = makeBrush( fillColor );
+   cx = Math.round( cx ); cy = Math.round( cy );
+   try {
+      g.fillRect( new Rect( cx - halfSize,     cy - halfSize,
+                            cx + halfSize + 1, cy + halfSize + 1 ), oBrush );
+      g.fillRect( new Rect( cx - halfSize + 1, cy - halfSize + 1,
+                            cx + halfSize,     cy + halfSize ),     fBrush );
+   } catch ( e ) {}
+}
+
+// Filled circle handle with outline, on Graphics. Scan-line of fillRects
+// (one row each), 2*radius+1 calls.
+function gfxFillCircleHandle( g, cx, cy, radius, fillColor, outlineColor )
+{
+   var oBrush = makeBrush( outlineColor );
+   var fBrush = makeBrush( fillColor );
+   var r2 = radius * radius;
+   var rIn = Math.max( 0, radius - 1 );
+   var rIn2 = rIn * rIn;
+   cx = Math.round( cx ); cy = Math.round( cy );
+   for ( var oy = -radius; oy <= radius; ++oy )
+   {
+      // Outer extent on this row.
+      var ex = Math.floor( Math.sqrt( Math.max( 0, r2 - oy*oy ) ) );
+      if ( ex < 0 ) continue;
+      // Inner extent (fill area).
+      var ix = (Math.abs( oy ) > rIn) ? -1
+             : Math.floor( Math.sqrt( Math.max( 0, rIn2 - oy*oy ) ) );
+
+      try {
+         // Outline row: full outer scanline.
+         g.fillRect( new Rect( cx - ex, cy + oy, cx + ex + 1, cy + oy + 1 ),
+                     oBrush );
+         // Inner fill row (overpaint), if any.
+         if ( ix >= 0 )
+            g.fillRect( new Rect( cx - ix, cy + oy, cx + ix + 1, cy + oy + 1 ),
+                        fBrush );
+      } catch ( e ) {}
+   }
+}
+
 // =====================================================================
 // Legacy Graphics-based stroke (kept available; not currently used).
 // =====================================================================
@@ -2152,26 +2274,26 @@ function PreviewFrame( parent )
                   pts.push( new Point( cp2.x0, cp2.y0 ) );
                }
             }
-            // Render shape outline + handles into a transparent bitmap
-            // and blit it onto the canvas. Pen / Brush colors were
-            // observed to render as black on the user's PJSR build, so
-            // we bypass the Pen API entirely and write pixel colors
-            // directly via Bitmap.setPixel (which DOES honor colors,
-            // as the preview itself proves).
-            var cw = self.width, ch = self.height;
-            var uiBmp = makeAlphaBitmap( cw, ch );    // ARGB32, transparent
+            // Render shape outline + handles DIRECTLY on the Graphics
+            // via g.fillRect with a Brush. We used to render onto a
+            // canvas-sized ARGB32 Bitmap and then drawBitmap it, but in
+            // some PJSR builds new Bitmap(w,h) defaults to RGB32 (no
+            // alpha), so fill(0) produces an opaque-black overlay that
+            // turns the entire preview area black on top. fillRect with
+            // Brush is verified to work in this build (the dialog grey
+            // fill at the start of onPaint paints fine).
+            if ( DEBUG_PREVIEW )
+               console.writeln(
+                  "[paint] drawing active shape outline via gfx fillRect" );
 
-            // High-saturation red outline (no alpha issue: full opaque
-            // is OK on Bitmap because we control the pixel values
-            // directly, not going through Pen).
             var shadowColor = argb( 0xff, 0, 0, 0 );           // black
             var mainColor   = data.maskInvert
                             ? argb( 0xff, 0x00, 0xcc, 0xff )   // cyan
                             : argb( 0xff, 0xff, 0x00, 0x00 );  // RED
 
             // Main outline: shadow + colored stroke.
-            bmpStrokeClosedPath( uiBmp, pts, shadowColor, 4, false );
-            bmpStrokeClosedPath( uiBmp, pts, mainColor,   2, false );
+            gfxStrokeClosedPath( g, pts, shadowColor, 4, false );
+            gfxStrokeClosedPath( g, pts, mainColor,   2, false );
 
             // Inner "core" contour (dashed).
             var gcShape = (s.gradientCenter != null)
@@ -2190,8 +2312,8 @@ function PreviewFrame( parent )
                   var ccp = self._imageRectToCanvas( cwx, cwy, cwx, cwy );
                   corePts.push( new Point( ccp.x0, ccp.y0 ) );
                }
-               bmpStrokeClosedPath( uiBmp, corePts, shadowColor, 3, true );
-               bmpStrokeClosedPath( uiBmp, corePts, mainColor,   1, true );
+               gfxStrokeClosedPath( g, corePts, shadowColor, 3, true );
+               gfxStrokeClosedPath( g, corePts, mainColor,   1, true );
             }
 
             // Draw the 4 corner handles + the rotation handle.
@@ -2217,19 +2339,14 @@ function PreviewFrame( parent )
                   var topWx = s.cx + localTopX * co - localTopY * si;
                   var topWy = s.cy + localTopX * si + localTopY * co;
                   var topC  = self._imageRectToCanvas( topWx, topWy, topWx, topWy );
-                  bmpThickLine( uiBmp, topC.x0, topC.y0, hx, hy, rotFill, 2 );
-                  bmpFillCircle( uiBmp, hx, hy, 8, rotFill, rotOutline );
+                  var rotBrush = makeBrush( rotFill );
+                  gfxThickLine( g, topC.x0, topC.y0, hx, hy, rotBrush, 2 );
+                  gfxFillCircleHandle( g, hx, hy, 8, rotFill, rotOutline );
                }
                else
                {
-                  bmpFillRect( uiBmp, hx, hy, 5, handleFill, handleOutline );
+                  gfxFillRectHandle( g, hx, hy, 5, handleFill, handleOutline );
                }
-            }
-
-            try { g.drawBitmap( 0, 0, uiBmp ); }
-            catch ( de ) {
-               try { g.drawBitmap( new Point( 0, 0 ), uiBmp ); }
-               catch ( de2 ) {}
             }
          }
 

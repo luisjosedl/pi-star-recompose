@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.43"
+#define VERSION       "1.1.44"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1419,13 +1419,20 @@ function shapePerimeterPoints( s, N )
 // thin outlines onto `bmp`. Mutates `bmp` in place. Safe to call with
 // a null or invalid bitmap.
 //
-// COLOR FORMAT: 0x00RRGGBB (alpha byte = 0x00). This keeps the packed
-// value well below 2^31 so JavaScript Number -> PJSR int32 conversion
-// never overflows into a negative value (which PJSR's color bridge
-// sanitises to opaque black - the long-standing "outline is black"
-// bug). On RGB32 destination bitmaps (which Image.render() returns for
-// 3-channel images) the alpha byte is ignored, and the lower 24 RGB
-// bits are written verbatim - exactly what we want.
+// COLOR FORMAT (v1.1.44): alpha 0x7f, RGB in lower 24 bits. Two
+// constraints drive this choice:
+//   - The packed value (a<<24 | rgb) must stay in positive int32 range
+//     (< 2^31). With alpha 0xff, 0xffff0000 is > 2^31; JS Number ->
+//     PJSR int32 conversion overflows to a negative, and PJSR's color
+//     bridge sanitises that to 0 (= opaque black). Cap alpha at 0x7f.
+//   - In v1.1.43 we tried alpha = 0x00. That works on RGB32 bitmaps
+//     (alpha ignored, RGB written) but it turns out Image.render()
+//     returns ARGB32 on this build, where alpha = 0 means "fully
+//     transparent" so the pixel is invisible and the dialog grey
+//     bleeds through (hence the "outline is still gray" complaint).
+// Alpha 0x7f sits in the safe zone: positive int32, semi-opaque on
+// ARGB32, alpha-ignored on RGB32. Either way the pixel renders
+// visibly in the requested color.
 function stampShapeOutlinesOnBitmap( bmp )
 {
    if ( bmp == null || bmp.width == null || bmp.width < 2 ) return;
@@ -1435,10 +1442,10 @@ function stampShapeOutlinesOnBitmap( bmp )
    // ----- Committed shapes: thinner orange (or cyan in Invert mode) -----
    if ( data.shapes && data.shapes.length > 0 )
    {
-      var cShadow = 0x00000000;                          // black halo
+      var cShadow = 0x7f000000;                          // black halo
       var cMain   = data.maskInvert
-                  ? 0x0000ffff                           // cyan
-                  : 0x00ff8000;                          // orange
+                  ? 0x7f00ffff                           // cyan
+                  : 0x7fff8000;                          // orange
       for ( var i = 0; i < data.shapes.length; ++i )
       {
          var pts = shapePerimeterPoints( data.shapes[i],
@@ -1453,10 +1460,10 @@ function stampShapeOutlinesOnBitmap( bmp )
      && (data.maskTool === "ellipse" || data.maskTool === "rect") )
    {
       var s = data.activeShape;
-      var aShadow = 0x00000000;                          // black halo
+      var aShadow = 0x7f000000;                          // black halo
       var aMain   = data.maskInvert
-                  ? 0x0000ffff                           // cyan
-                  : 0x00ff0000;                          // RED
+                  ? 0x7f00ffff                           // cyan
+                  : 0x7fff0000;                          // RED
       var apts = shapePerimeterPoints( s,
                                        s.type === "ellipse" ? 96 : 4 );
       bmpStrokeClosedPath( bmp, apts, aShadow, 5, false );
@@ -1486,8 +1493,8 @@ function stampShapeOutlinesOnBitmap( bmp )
       // Sizes are in IMAGE/bitmap coords, so they scale with zoom.
       // Tuned to be visible at typical preview sizes (800-1900 px).
       var hFill = aMain;
-      var hBord = 0x00ffffff;                            // white border
-      var rFill = 0x0000ff00;                            // green rotate
+      var hBord = 0x7fffffff;                            // white border
+      var rFill = 0x7f00ff00;                            // green rotate
       var handles = getActiveShapeHandles();
       var co = Math.cos( s.angle ), si = Math.sin( s.angle );
       var hHalf = Math.max( 4, Math.round( bmp.width / 200 ) );
@@ -2192,13 +2199,19 @@ function updatePreview()
          // Render the effective mask (raster + active shape) as a
          // grayscale image into the preview window. A scalar PixelMath
          // expression broadcast to a multi-channel target gives R=G=B
-         // (i.e. B/W).
+         // (i.e. B/W). When Invert is enabled, we show (1 - mask) so
+         // the B/W view matches what the combine actually does (mask
+         // attenuates stars where painted in normal mode, KEEPS stars
+         // where painted in invert mode).
          var maskId    = maskIsActive() ? ID_MASK : null;
          var pendingId = pendingMaskIsActive() ? ID_MASK_PENDING : null;
          var activeExp = (data.activeShape != null) ? activeShapeMaskExpr() : null;
          var eff       = buildEffectiveMaskExpr( maskId, pendingId, activeExp );
+         var maskExpr  = (eff != null) ? eff : "0";
+         if ( data.maskInvert )
+            maskExpr = "(1-(" + maskExpr + "))";
          var pmMask = new PixelMath;
-         pmMask.expression          = (eff != null) ? eff : "0";
+         pmMask.expression          = maskExpr;
          pmMask.useSingleExpression = true;
          pmMask.createNewImage      = false;
          pmMask.generateOutput      = true;
@@ -3387,9 +3400,8 @@ function CombinerDialog()
 
    // ---- Save stretched stars (optional second output) ----
    var keepLabel = new Label( this );
-   keepLabel.text          = "Save stars:";
-   keepLabel.setFixedWidth( labelWidth );
-   keepLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   keepLabel.text          = "Create stars layer:";
+   keepLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
    this.keepStarsCheck = new CheckBox( this );
    this.keepStarsCheck.text    = "";
@@ -3491,6 +3503,10 @@ function CombinerDialog()
       if ( self.previewFrame ) self.previewFrame.repaint();
       scheduleUpdate();
    };
+   // Single-shape model (v1.1.43+): this button is no longer wired
+   // into any sizer. Hide it explicitly so PJSR does not float the
+   // orphan widget at the dialog's top-left corner.
+   this.maskCommitBtn.hide();
 
    this.maskInvertCheck = new CheckBox( this );
    this.maskInvertCheck.text    = "Invert";
@@ -3621,6 +3637,13 @@ function CombinerDialog()
    shapesRow.add( this.shapesCombo, 100 );
    shapesRow.add( this.shapeEditBtn );
    shapesRow.add( this.shapeDeleteBtn );
+   // Single-shape model: this row is no longer added to leftPanel.
+   // Hide each widget so PJSR doesn't float the orphan controls at
+   // the dialog's top-left corner.
+   shapesLabel.hide();
+   this.shapesCombo.hide();
+   this.shapeEditBtn.hide();
+   this.shapeDeleteBtn.hide();
 
    // Quick "Compare" button: toggle Edit <-> Result so the user can
    // flip between with/without mask effect with a single click.
@@ -3889,7 +3912,9 @@ function CombinerDialog()
    leftPanel.add( scnrRow );
 
    leftPanel.add( makeSection( 3, "Mask (optional)",
-                  "limit the stretch to a region" ) );
+                  "limit the stretch to a region. " +
+                  "Shortcuts: ESC = cancel ellipse, DEL = clear mask, " +
+                  "M = toggle compare. Mouse-wheel zooms; drag with Pan tool." ) );
    leftPanel.add( maskToolRow );
    // Shapes manager row removed in v1.1.43 (single-shape model).
    // leftPanel.add( shapesRow );
@@ -3922,20 +3947,17 @@ function CombinerDialog()
    //   DELETE : clear the entire mask (same as Clear Mask button)
    this.onKeyPress = function( keyCode, modifiers )
    {
+      // NOTE: KeyModifier_Shift is NOT defined in some PJSR builds
+      // (caused a ReferenceError that crashed the dialog when ESC was
+      // pressed). Since brush is hidden in this release and the only
+      // modifier shortcut was SHIFT+ESC for pending brush strokes, we
+      // just dropped modifier handling entirely. If we re-add brush
+      // support later, use the literal 0x02000000 (Qt::ShiftModifier)
+      // or wrap the constant lookup in a try/catch.
       var handled = false;
-      var shiftDown = !!(modifiers & KeyModifier_Shift);
       if ( keyCode === Key_Escape )
       {
-         if ( shiftDown && pendingMaskIsActive() )
-         {
-            // SHIFT+ESC: discard pending brush strokes only.
-            clearMaskPending();
-            updateCommitButton();
-            if ( self.previewFrame ) self.previewFrame.repaint();
-            scheduleUpdate();
-            handled = true;
-         }
-         else if ( data.activeShape != null )
+         if ( data.activeShape != null )
          {
             discardActiveShape();
             updateCommitButton();
@@ -3946,14 +3968,8 @@ function CombinerDialog()
       }
       else if ( keyCode === Key_Return || keyCode === Key_Enter )
       {
-         if ( hasPendingEdits() )
-         {
-            commitAllPending();
-            updateCommitButton();
-            if ( self.previewFrame ) self.previewFrame.repaint();
-            scheduleUpdate();
-            handled = true;
-         }
+         // No-op in single-shape model (nothing to commit). Kept for
+         // compatibility; if the user hits ENTER we simply do nothing.
       }
       else if ( keyCode === Key_Delete )
       {

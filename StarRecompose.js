@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.42"
+#define VERSION       "1.1.43"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -453,6 +453,20 @@ function syncCacheAndPreview()
    var newSize = computeCacheMaxSize();
    if ( Math.abs( newSize - __cacheSize ) >= 50 )
    {
+      // Remember the OLD cache dimensions so we can scale shape coords
+      // to match the new ones. Shape coordinates are stored in cache
+      // pixels (cx, cy, rx, ry, feather), and if we don't scale them
+      // here the user's ellipse appears to drift across the image when
+      // the dialog is resized.
+      var oldW = (data.starlessSmall != null
+               && data.starlessSmall.mainView != null
+               && data.starlessSmall.mainView.image != null)
+                ? data.starlessSmall.mainView.image.width : 0;
+      var oldH = (data.starlessSmall != null
+               && data.starlessSmall.mainView != null
+               && data.starlessSmall.mainView.image != null)
+                ? data.starlessSmall.mainView.image.height : 0;
+
       __cacheSize = newSize;
       if ( data.starlessView != null && !data.starlessView.isNull )
          data.starlessSmall = buildSmall( data.starlessView, ID_SL_SMALL, __cacheSize );
@@ -465,11 +479,42 @@ function syncCacheAndPreview()
       if ( data.starlessSmall != null )
       {
          var sl = data.starlessSmall.mainView.image;
+         if ( oldW > 0 && oldH > 0
+           && (sl.width !== oldW || sl.height !== oldH) )
+         {
+            scaleShapesToNewCache( oldW, oldH, sl.width, sl.height );
+         }
          resampleMaskTo( sl.width, sl.height );
          rebuildMaskOverlay();
       }
    }
    updatePreview();
+}
+
+// Scale every shape coord (active + any persisted committed shapes)
+// from the old cache dimensions to the new ones. Called from
+// syncCacheAndPreview after the cache has been rebuilt. Assumes
+// uniform aspect-preserving scaling, which is what buildSmall does.
+function scaleShapesToNewCache( oldW, oldH, newW, newH )
+{
+   var sx = newW / oldW;
+   var sy = newH / oldH;
+   // Average scale for radius / feather (aspect is preserved so
+   // sx ~= sy in practice).
+   var sr = (sx + sy) * 0.5;
+   function scaleOne( s )
+   {
+      if ( s == null ) return;
+      s.cx      *= sx;
+      s.cy      *= sy;
+      s.rx      *= sr;
+      s.ry      *= sr;
+      s.feather *= sr;
+   }
+   scaleOne( data.activeShape );
+   if ( data.shapes != null )
+      for ( var i = 0; i < data.shapes.length; ++i )
+         scaleOne( data.shapes[i] );
 }
 
 var __resizeTimer = null;
@@ -1403,7 +1448,7 @@ function stampShapeOutlinesOnBitmap( bmp )
       }
    }
 
-   // ----- Active shape: bright yellow (or cyan) outline + handles -----
+   // ----- Active shape: bright red (or cyan) outline + handles -----
    if ( data.activeShape != null
      && (data.maskTool === "ellipse" || data.maskTool === "rect") )
    {
@@ -1411,7 +1456,7 @@ function stampShapeOutlinesOnBitmap( bmp )
       var aShadow = 0x00000000;                          // black halo
       var aMain   = data.maskInvert
                   ? 0x0000ffff                           // cyan
-                  : 0x00ffff00;                          // YELLOW
+                  : 0x00ff0000;                          // RED
       var apts = shapePerimeterPoints( s,
                                        s.type === "ellipse" ? 96 : 4 );
       bmpStrokeClosedPath( bmp, apts, aShadow, 5, false );
@@ -2827,17 +2872,10 @@ function PreviewFrame( parent )
 
       if ( data.activeShape != null )
       {
-         // Click missed the existing shape -> commit it into the
-         // persistent mask and hide the editor. The user's mask
-         // remains applied (now shown as a thin orange outline) but
-         // the handles/outline of the in-progress shape disappear so
-         // the preview is uncluttered. A subsequent click starts a
-         // NEW shape.
-         commitActiveShape();
-         rebuildMaskOverlay();
-         updateCommitButton();
-         scheduleUpdate();
-         refreshPreviewWithOutlines();
+         // Single-shape model (v1.1.43+): clicking outside the active
+         // ellipse / rect does NOTHING. The shape stays put and the
+         // user can keep adjusting its handles. To start a different
+         // shape they must explicitly Clear Mask first.
          return;
       }
 
@@ -3421,13 +3459,10 @@ function CombinerDialog()
    this.maskToolCombo.onItemSelected = function( idx )
    {
       var newTool = ["pan","ellipse","rect"][ idx ] || "pan";
-      // When switching AWAY from an editable-shape tool, auto-commit
-      // any active shape so the user doesn't lose work.
-      if ( newTool !== data.maskTool && data.activeShape != null )
-      {
-         commitActiveShape();
-         rebuildMaskOverlay();
-      }
+      // Single-shape model (v1.1.43+): switching tools does NOT
+      // auto-commit or discard the active shape. The shape persists
+      // and remains editable when the user switches back to a matching
+      // tool. To replace it the user clicks Clear Mask.
       data.maskTool = newTool;
       updateMaskRowsVisibility();
       updateCommitButton();
@@ -3517,7 +3552,9 @@ function CombinerDialog()
    maskToolRow.add( maskToolLabel );
    maskToolRow.add( this.maskToolCombo, 100 );
    maskToolRow.add( this.maskInvertCheck );
-   maskToolRow.add( this.maskCommitBtn );
+   // Apply Edits button removed in v1.1.43 (single-shape model: the
+   // active shape IS the mask, no separate commit step needed).
+   // maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
 
    // ---- Committed shapes manager: list + Edit + Delete ----
@@ -3854,7 +3891,8 @@ function CombinerDialog()
    leftPanel.add( makeSection( 3, "Mask (optional)",
                   "limit the stretch to a region" ) );
    leftPanel.add( maskToolRow );
-   leftPanel.add( shapesRow );
+   // Shapes manager row removed in v1.1.43 (single-shape model).
+   // leftPanel.add( shapesRow );
    leftPanel.add( viewModeRow );
    leftPanel.add( this.maskStrengthNC );
    leftPanel.add( this.maskFeatherNC );

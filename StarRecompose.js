@@ -69,12 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.52"
-
-// Set to 1 to log every preview setBitmap with bitmap stats. Used to
-// hunt down the "preview goes black on click" complaint. Switch off
-// for release once the cause is identified.
-#define DEBUG_PREVIEW 0
+#define VERSION       "1.2.0"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1165,46 +1160,6 @@ function smoothMaskWindows( sigmaPct )
    }
 }
 
-// One-time console diagnostic on first paint: logs what PJSR actually
-// stored in the Pen/Brush properties for our color values. If the
-// colors keep coming out black, the console output will show whether
-// the issue is at construction time, property assignment, or render.
-var __colorDebugLogged = false;
-function logColorDebug( color )
-{
-   if ( __colorDebugLogged ) return;
-   __colorDebugLogged = true;
-   try
-   {
-      console.show();
-      console.writeln( "" );
-      console.writeln( "============ AstroDL color diagnostic ============" );
-      console.writeln( "Test color requested: 0x" + color.toString( 16 ) +
-                       " (decimal " + color + ")" );
-      var p1 = null;
-      try { p1 = new Pen( color, 2.0 ); } catch ( e ) {
-         console.writeln( "new Pen(color, 2.0) threw: " + e.message );
-      }
-      if ( p1 != null )
-         console.writeln( "Pen ctor: pen.color = 0x" + p1.color.toString(16) +
-                          ", pen.width = " + p1.width +
-                          ", pen.style = " + p1.style );
-      var p2 = new Pen();
-      try { p2.color = color; } catch ( e ) {
-         console.writeln( "pen.color = color threw: " + e.message );
-      }
-      console.writeln( "Property set: pen.color = 0x" + p2.color.toString(16) );
-      var b1 = null;
-      try { b1 = new Brush( color ); } catch ( e ) {
-         console.writeln( "new Brush(color) threw: " + e.message );
-      }
-      if ( b1 != null )
-         console.writeln( "Brush ctor: brush.color = 0x" + b1.color.toString(16) );
-      console.writeln( "==================================================" );
-   }
-   catch ( ee ) { /* ignore logging errors */ }
-}
-
 // Defensive builders for Pen and Brush. PJSR has shown inconsistent
 // behavior with the constructor's color argument; this sets the color
 // both ways (constructor + property), and forces SolidLine style.
@@ -1433,29 +1388,15 @@ function buildRotateCursorBitmap()
    var cx   = 13, cy = 13;
    var r    = 9;
 
-   var __probeLogged = false;
    function safeSet( x, y, fullColor, safeColor )
    {
       if ( x < 0 || y < 0 || x >= bmp.width || y >= bmp.height ) return;
       try {
          bmp.setPixel( x, y, fullColor );
-         var got = bmp.pixel( x, y );
-         // Compare bit-patterns as uint32 so signed/unsigned int32
+         // Compare bit-patterns as uint32 so signed / unsigned int32
          // representations of the same value match.
-         var gotU  = (got       >>> 0);
-         var wantU = (fullColor >>> 0);
-         if ( gotU !== wantU )
-         {
-            if ( !__probeLogged ) {
-               console.writeln(
-                  "[cursor] PJSR sanitised setPixel(0x" +
-                  wantU.toString( 16 ) + "); got 0x" +
-                  gotU.toString( 16 ) +
-                  ". Falling back to alpha 0x7f for cursor pixels." );
-               __probeLogged = true;
-            }
+         if ( ((bmp.pixel( x, y )) >>> 0) !== ((fullColor) >>> 0) )
             bmp.setPixel( x, y, safeColor );
-         }
       } catch ( e ) {
          try { bmp.setPixel( x, y, fullColor ); } catch ( e2 ) {}
       }
@@ -1899,53 +1840,6 @@ function gfxFillCircleHandle( g, cx, cy, radius, fillColor, outlineColor )
    }
 }
 
-// =====================================================================
-// Legacy Graphics-based stroke (kept available; not currently used).
-// =====================================================================
-
-function strokeClosedPathWithShadow( g, pts, mainColor, lineWidth, dashed )
-{
-   if ( pts == null || pts.length < 2 ) return;
-   logColorDebug( mainColor );        // one-time PJSR color diagnostic
-   try { g.antialiasing = true; } catch ( ae ) {}
-
-   var penStyle  = dashed ? 2 : 1;
-   var shadowPen = makePen( 0x7f000000, lineWidth + 1.5, penStyle );
-   var colorPen  = makePen( mainColor,  lineWidth,        penStyle );
-
-   // Preferred path: pen-only polygon stroke. Brush state is ignored.
-   var useStroke = true;
-   try
-   {
-      g.pen = shadowPen;
-      g.strokePolygon( pts );
-      g.pen = colorPen;
-      g.strokePolygon( pts );
-   }
-   catch ( spe )
-   {
-      useStroke = false;
-   }
-   if ( useStroke ) return;
-
-   // Fallback: explicit line loop.
-   g.pen = shadowPen;
-   for ( var i = 0; i < pts.length; ++i )
-   {
-      var pa = pts[i];
-      var pb = pts[ (i + 1) % pts.length ];
-      g.drawLine( pa.x, pa.y, pb.x, pb.y );
-   }
-
-   g.pen = colorPen;
-   for ( var j = 0; j < pts.length; ++j )
-   {
-      var pc = pts[j];
-      var pd = pts[ (j + 1) % pts.length ];
-      g.drawLine( pc.x, pc.y, pd.x, pd.y );
-   }
-}
-
 // ===================== Active shape =====================
 
 // Build a PixelMath sub-expression (no surrounding "min(1,...)" or
@@ -2317,56 +2211,6 @@ function runPipeline( starlessId, starsSrcId, procView, targetView,
 // ===================== Live preview =====================
 
 var __updating = false;
-var __blackPreviewLogged = false;
-var __setBitmapSeq = 0;
-
-// Sample 9 points (3x3 grid) of `im` on channel 0 and return basic
-// stats. Helps distinguish "combine produced black" from "combine
-// produced normal output but the canvas painted black anyway".
-function sampleImageStats9( im )
-{
-   if ( im == null || im.width < 2 || im.height < 2 )
-      return { max: 0, mean: 0, n: 0 };
-   var max = 0, sum = 0, n = 0;
-   for ( var iy = 0; iy < 3; ++iy )
-      for ( var ix = 0; ix < 3; ++ix )
-      {
-         var px = Math.floor( im.width  * (ix + 1) / 4 );
-         var py = Math.floor( im.height * (iy + 1) / 4 );
-         var v = im.sample( px, py, 0 );
-         if ( v > max ) max = v;
-         sum += v;
-         ++n;
-      }
-   return { max: max, mean: sum / n, n: n };
-}
-
-// One-line debug log emitted right before every previewFrame.setBitmap.
-// Tag identifies which code path is painting (single-starless,
-// single-stars, mask, combine). bmp is the actual Bitmap that will be
-// passed to setBitmap; srcImg is the source Image used to render it
-// (so we can sample it directly).
-function logSetBitmap( tag, srcImg, bmp )
-{
-   if ( !DEBUG_PREVIEW ) return;
-   ++__setBitmapSeq;
-   var bw = (bmp != null) ? bmp.width  : -1;
-   var bh = (bmp != null) ? bmp.height : -1;
-   var stats = (srcImg != null) ? sampleImageStats9( srcImg )
-                                : { max: -1, mean: -1, n: 0 };
-   var hasShape = (data && data.activeShape != null);
-   var vm = (data && data.viewMode) ? data.viewMode : "?";
-   console.writeln(
-      "[preview #" + __setBitmapSeq + "] " + tag +
-      "  bmp=" + bw + "x" + bh +
-      "  max=" + stats.max.toFixed( 4 ) +
-      "  mean=" + stats.mean.toFixed( 4 ) +
-      "  viewMode=" + vm +
-      "  activeShape=" + hasShape +
-      "  strength=" + (data ? data.maskStrength : -1).toFixed( 2 ) +
-      "  invert=" + (data ? data.maskInvert : "?")
-   );
-}
 
 function updatePreview()
 {
@@ -2379,8 +2223,6 @@ function updatePreview()
    if ( !hasStarless && !hasStars )
    {
       // Nothing loaded yet - show the placeholder.
-      if ( DEBUG_PREVIEW )
-         console.writeln( "[preview] clearing (nothing loaded)" );
       ui.previewFrame.setBitmap( null );
       return;
    }
@@ -2397,7 +2239,6 @@ function updatePreview()
          data.lastPreviewSrcImg = slOnlyIm;
          var slOnlyBmp = slOnlyIm.render();
          stampShapeOutlinesOnBitmap( slOnlyBmp );
-         logSetBitmap( "single-starless", slOnlyIm, slOnlyBmp );
          ui.previewFrame.setBitmap( slOnlyBmp );
          return;
       }
@@ -2419,7 +2260,6 @@ function updatePreview()
          data.lastPreviewSrcImg = stProcIm;
          var stProcBmp = stProcIm.render();
          stampShapeOutlinesOnBitmap( stProcBmp );
-         logSetBitmap( "single-stars", stProcIm, stProcBmp );
          ui.previewFrame.setBitmap( stProcBmp );
          return;
       }
@@ -2479,46 +2319,6 @@ function updatePreview()
       data.lastPreviewSrcImg = pvIm;
       var bmp   = pvIm.render();
       stampShapeOutlinesOnBitmap( bmp );
-
-      // Always-on diagnostic for the "black preview" hunt.
-      var tag = (data.viewMode === "mask") ? "mask" :
-                ((data.viewMode === "result") ? "combine+mask" : "combine");
-      logSetBitmap( tag, pvIm, bmp );
-
-      // Loud warning if the rendered preview image really IS all-black
-      // (max of 9 samples below 0.001). Independent of the verbose log
-      // above so it stands out in the console.
-      if ( !__blackPreviewLogged )
-      {
-         var stats = sampleImageStats9( pvIm );
-         if ( stats.max < 0.001 )
-         {
-            __blackPreviewLogged = true;
-            console.show();
-            console.warningln( "* AstroDL: preview image is fully black (max=" +
-                               stats.max.toFixed( 6 ) + ", mean=" +
-                               stats.mean.toFixed( 6 ) + ")." );
-            if ( data.starlessSmall != null )
-            {
-               var slS = sampleImageStats9( data.starlessSmall.mainView.image );
-               console.writeln( "  starlessSmall  max=" + slS.max.toFixed( 4 ) +
-                                " mean=" + slS.mean.toFixed( 4 ) );
-            }
-            if ( data.starsSmall != null )
-            {
-               var stS = sampleImageStats9( data.starsSmall.mainView.image );
-               console.writeln( "  starsSmall     max=" + stS.max.toFixed( 4 ) +
-                                " mean=" + stS.mean.toFixed( 4 ) );
-            }
-            if ( data.starsProc != null )
-            {
-               var spS = sampleImageStats9( data.starsProc.mainView.image );
-               console.writeln( "  starsProc      max=" + spS.max.toFixed( 4 ) +
-                                " mean=" + spS.mean.toFixed( 4 ) );
-            }
-         }
-      }
-
       ui.previewFrame.setBitmap( bmp );
    }
    catch ( e )

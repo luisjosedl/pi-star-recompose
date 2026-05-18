@@ -6,6 +6,7 @@
 > ellipse mask to limit the stars stretch to a region of the frame.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](#)
 
 ## What it does
 
@@ -16,15 +17,16 @@ Recompose Pro recombines them:
 
 - Pick your **Starless** (already stretched, non-linear) and your
   **Stars** (still linear, e.g. from StarXTerminator or StarNet++).
-- Three sliders control the stars layer: `Stretch` (intensity), `Color
-  Boost` (saturation), and `Mask Strength`. Optional **SCNR Green** and
-  **SCNR Magenta** to clean a residual color cast on the stars.
+- Tune **Stretch**, **Color Boost**, and (optionally) **Mask
+  Strength / Feather / Gradient**. Optional **SCNR Green** and **SCNR
+  Magenta** to clean a residual color cast on the stars.
 - A live preview inside the dialog shows the recombined result as you
-  move the sliders. Mouse-wheel to zoom, drag with the Pan tool to
+  move the sliders. Mouse-wheel zooms; drag with the Pan tool to
   navigate.
 - **Apply** runs the same pipeline at full resolution and creates the
   `Combined` image. Optionally also keeps the stretched stars as a
-  separate `Stars_Stretched` image you can use as a layer.
+  separate `Stars_Stretched` image you can use as a layer in
+  Photoshop / GIMP.
 
 Your original views are never touched.
 
@@ -34,31 +36,38 @@ You can add a single editable **ellipse** that limits where the stars
 contribute. Useful to preserve the soft core of a galaxy or nebula
 without crushing the star colors in the surrounding sky.
 
-- Select **Ellipse** in the *Mask Tool* combo, then click+drag on the
-  preview. The first click and the drag endpoint define the two ends of
-  the major axis (the ellipse auto-rotates to that orientation).
-- Drag the **four red corner handles** to resize. Drag the **green
-  handle** above the ellipse to rotate. Drag the body to move.
-- The ellipse stays anchored to the same region when you resize the
-  dialog window.
+- Select **Ellipse** in the *Mask Tool* combo. The cursor turns into a
+  crosshair, signaling "click here to start drawing".
+- Click and drag on the preview. The first click and the drag endpoint
+  define the two ends of the major axis (the ellipse auto-rotates to
+  match that orientation).
+- Drag the **four red corner handles** to resize. Hover any handle and
+  the cursor turns into a pointing hand.
+- Drag the **green handle** above the ellipse to rotate. The cursor
+  changes to a circular-arrow icon over the rotate handle.
+- Drag the body of the ellipse to move it. The shape stays anchored
+  to the same region when you resize the dialog window.
 - **Mask Strength**: how much the stars are attenuated where the
   ellipse covers (0 = mask disabled, 1 = stars fully removed inside).
 - **Mask Feather**: soft-edge transition width, as a percentage of
   image width.
 - **Gradient**: where inside the ellipse the solid `mask=1` core ends
   and the falloff begins (0% = pure gradient from center, 100% = hard
-  edge at the ellipse boundary).
+  edge at the ellipse boundary). The dashed inner outline shows the
+  current core boundary at a uniform inset from the perimeter (with a
+  smooth fallback on very elongated ellipses where a true uniform
+  offset is geometrically impossible).
 - **Invert**: keeps stars only inside the ellipse and removes them
   everywhere else (the outline turns cyan in this mode).
 - **Clear Mask** removes the ellipse and restores stars everywhere.
 
 The **View** combo lets you switch between:
-- *Image only* &mdash; recombined preview with no mask effect (best for
-  aligning the ellipse to features).
+- *Image only* &mdash; recombined preview with no mask effect (best
+  for aligning the ellipse to features).
 - *Image + mask effect* &mdash; the same view the Apply button will
   produce.
-- *Mask only (B/W)* &mdash; the raw mask in grayscale, useful to verify
-  the gradient profile.
+- *Mask only (B/W)* &mdash; the raw mask in grayscale (respects the
+  Invert checkbox), useful to verify the gradient profile.
 
 The **Compare** button toggles between *Image only* and *Image + mask
 effect* in one click.
@@ -67,21 +76,21 @@ effect* in one click.
 
 For each preview update, the script runs:
 
-1. `PixelMath` per-channel rational stretch on a temporary copy of the
-   stars layer: `y = (K * x) / ((K-1) * x + 1)`, where K is the
-   *Stretch* slider value (1..1000).
-2. `ColorSaturation` hat-curve to add saturation to bright star cores:
-   `[(0, b*0.50), (0.5, b*0.85), (1, b*0.50)]` Akima subsplines, where
-   `b` is the *Color Boost* slider.
-3. Optional `SCNR Green` (AverageNeutral, preserveLightness) and / or
-   custom Magenta removal via PixelMath:
-   `R' = R - min(max(0, R-G), max(0, B-G))` and same for B.
-4. `PixelMath` combine:
+1. **Per-channel rational stretch** on a temporary copy of the stars
+   layer via `PixelMath`: `y = (K * x) / ((K-1) * x + 1)`, where K is
+   the *Stretch* slider value (1..1000).
+2. **`ColorSaturation` hat-curve** to add saturation to bright star
+   cores: `[(0, b*0.50), (0.5, b*0.85), (1, b*0.50)]` Akima
+   subsplines, where `b` is the *Color Boost* slider.
+3. **Optional `SCNR Green`** (AverageNeutral, preserveLightness)
+   and / or **custom Magenta removal** via PixelMath:
+   `R' = R - min(max(0, R-G), max(0, B-G))` and the same for B.
+4. **`PixelMath` combine**:
    `final = min(1, starless + stars_proc * (1 - mask * strength))`
    (or `(1 - (1-mask) * strength)` in invert mode).
 
-The full-resolution Apply uses the same expressions at the native size
-of the source views.
+The full-resolution Apply uses the same expressions at the native
+size of the source views.
 
 ## Installation
 
@@ -123,16 +132,41 @@ Future versions install automatically the next time you run
 
 ## Saving presets as process icons
 
-Drag the blue **New Instance** triangle (bottom-left of the dialog) to
-the PixInsight workspace. PixInsight saves the current slider values
-and Output name as a process icon. Rename it
+Drag the blue **New Instance** triangle (bottom-left of the dialog)
+to the PixInsight workspace. PixInsight saves the current slider
+values and Output name as a process icon. Rename it
 (right-click &rarr; *Set Process Identifier...*) to something like
 `StarRecompose_NebulaPreset`. Re-open later by double-clicking the
 icon and pressing the play button.
 
 > Note: the ellipse geometry itself is not currently persisted across
-> sessions, but the sliders and SCNR / output settings are.
+> sessions, but the sliders, SCNR and output settings are.
+
+## What's new in v1.2.0 (first stable release)
+
+- Removed all debug/diagnostic console logging from internal
+  development; the script runs silently now except for genuine error
+  conditions (missing views, dimension mismatch, etc.).
+- Custom rotation cursor for the green handle (3/4-circle arc with
+  arrowhead, drawn pixel-by-pixel via `Bitmap.setPixel` because PJSR
+  has no `StdCursor_Rotate`). Falls back to `StdCursor_PointingHand`
+  if the PJSR build doesn't accept custom cursors.
+- Crosshair cursor when the Ellipse tool is active and no shape
+  exists yet, signalling "click to draw".
+- Inner gradient-core outline is now a true offset curve (uniform
+  perpendicular distance from the outer perimeter), with an automatic
+  fallback to scaled-down ellipse on insets that would otherwise fold
+  the curve.
+- Active-shape outline and handles stamped directly into the preview
+  bitmap via `Bitmap.setPixel`, the only PJSR primitive that reliably
+  honours arbitrary colors on this build.
+- Single-shape model: removed the multi-shape Apply Edits / Shapes
+  manager UI that was a frequent source of confusion; the active
+  ellipse IS the mask.
+- README, in-script tooltips, and the PixInsight repository
+  description rewritten to match current functionality.
 
 ## License
 
-[MIT](LICENSE). Free for personal and commercial use, with attribution.
+[MIT](LICENSE). Free for personal and commercial use, with
+attribution.

@@ -66,7 +66,7 @@
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
       <package fileName="pkg/AstroDL-StarRecompose-1.2.1.tar.gz"
-               sha1="ec9d55b3ced8eddf468b432179a1a813708976ed"
+               sha1="c9ff25c69d6df51404bdb788b579eea917d27272"
                type="script"
                releaseDate="20260518">
          <title>Star Recompose Pro</title>

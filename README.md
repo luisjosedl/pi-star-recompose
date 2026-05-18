@@ -1,49 +1,87 @@
-# AstroDL - Star Recompose
+# AstroDL - Star Recompose Pro
 
 > **AstroDL** is luisjosedl's astrophotography tool suite for PixInsight.
-> **Star Recompose** is the first tool in the suite: it recomposes a
-> stretched starless image with a linear stars-only image, using a
-> custom ArcsinhStretch-based engine and a live embedded preview.
+> **Star Recompose Pro** recomposes a stretched starless image with a
+> linear stars-only image, with a live preview and an optional editable
+> ellipse mask to limit the stars stretch to a region of the frame.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## What it does
 
-Astrophoto processing workflows typically split a linear image into a
+A typical astrophotography workflow splits a linear image into a
 `starless` half (which you stretch creatively) and a `stars-only` half
-(which is hard to stretch without blowing out star cores). This script
-recomposes them:
+(which is hard to stretch without blowing out star cores). Star
+Recompose Pro recombines them:
 
-- Pick your **starless** (already stretched, non-linear) and your
-  **stars-only** (still linear, e.g. from StarXTerminator / StarNet++).
-- Three sliders control the stars: `Stretch Intensity`, `Black Point`
-  and `Star Color Boost`. Optional `Remove Green via SCNR`.
+- Pick your **Starless** (already stretched, non-linear) and your
+  **Stars** (still linear, e.g. from StarXTerminator or StarNet++).
+- Three sliders control the stars layer: `Stretch` (intensity), `Color
+  Boost` (saturation), and `Mask Strength`. Optional **SCNR Green** and
+  **SCNR Magenta** to clean a residual color cast on the stars.
 - A live preview inside the dialog shows the recombined result as you
-  move the sliders. Mouse-wheel zoom, click-drag pan.
+  move the sliders. Mouse-wheel to zoom, drag with the Pan tool to
+  navigate.
 - **Apply** runs the same pipeline at full resolution and creates the
-  `Combined` image. Optionally also keeps the stretched-stars layer as
-  a separate image you can use as a brush layer or process further.
+  `Combined` image. Optionally also keeps the stretched stars as a
+  separate `Stars_Stretched` image you can use as a layer.
 
-Your originals are never touched.
+Your original views are never touched.
 
-## Why ArcsinhStretch
+## Mask editor (optional)
 
-The stars are stretched using PixInsight's native **ArcsinhStretch**
-(based on Lupton et al. 1999), instead of a midtones rational stretch.
-The asinh curve is linear in the shadows and logarithmic in the
-highlights, which preserves the RGB color ratios in bright star cores
-instead of crushing them to white. With `protectHighlights` and
-`useRgbws` enabled, star colors stay clean and saturated even on the
-brightest stars in the field.
+You can add a single editable **ellipse** that limits where the stars
+contribute. Useful to preserve the soft core of a galaxy or nebula
+without crushing the star colors in the surrounding sky.
 
-The pipeline:
+- Select **Ellipse** in the *Mask Tool* combo, then click+drag on the
+  preview. The first click and the drag endpoint define the two ends of
+  the major axis (the ellipse auto-rotates to that orientation).
+- Drag the **four red corner handles** to resize. Drag the **green
+  handle** above the ellipse to rotate. Drag the body to move.
+- The ellipse stays anchored to the same region when you resize the
+  dialog window.
+- **Mask Strength**: how much the stars are attenuated where the
+  ellipse covers (0 = mask disabled, 1 = stars fully removed inside).
+- **Mask Feather**: soft-edge transition width, as a percentage of
+  image width.
+- **Gradient**: where inside the ellipse the solid `mask=1` core ends
+  and the falloff begins (0% = pure gradient from center, 100% = hard
+  edge at the ellipse boundary).
+- **Invert**: keeps stars only inside the ellipse and removes them
+  everywhere else (the outline turns cyan in this mode).
+- **Clear Mask** removes the ellipse and restores stars everywhere.
 
-1. `ArcsinhStretch` (intensity + optional black point) on a temporary
-   copy of the stars layer.
-2. `ColorSaturation` hat-curve with AstroDL values
-   `[(0, 0.50), (0.5, 0.85), (1, 0.50)] * boost`, Akima subsplines.
-3. Optional `SCNR Green` (AverageNeutral, preserveLightness).
-4. `PixelMath`: `final = min(1, starless + stars_proc)`.
+The **View** combo lets you switch between:
+- *Image only* &mdash; recombined preview with no mask effect (best for
+  aligning the ellipse to features).
+- *Image + mask effect* &mdash; the same view the Apply button will
+  produce.
+- *Mask only (B/W)* &mdash; the raw mask in grayscale, useful to verify
+  the gradient profile.
+
+The **Compare** button toggles between *Image only* and *Image + mask
+effect* in one click.
+
+## Pipeline
+
+For each preview update, the script runs:
+
+1. `PixelMath` per-channel rational stretch on a temporary copy of the
+   stars layer: `y = (K * x) / ((K-1) * x + 1)`, where K is the
+   *Stretch* slider value (1..1000).
+2. `ColorSaturation` hat-curve to add saturation to bright star cores:
+   `[(0, b*0.50), (0.5, b*0.85), (1, b*0.50)]` Akima subsplines, where
+   `b` is the *Color Boost* slider.
+3. Optional `SCNR Green` (AverageNeutral, preserveLightness) and / or
+   custom Magenta removal via PixelMath:
+   `R' = R - min(max(0, R-G), max(0, B-G))` and same for B.
+4. `PixelMath` combine:
+   `final = min(1, starless + stars_proc * (1 - mask * strength))`
+   (or `(1 - (1-mask) * strength)` in invert mode).
+
+The full-resolution Apply uses the same expressions at the native size
+of the source views.
 
 ## Installation
 
@@ -56,16 +94,13 @@ The pipeline:
 
 3. Click **OK**, then `Resources > Updates > Check for Updates` and
    accept the proposed update. PixInsight will show an
-   **"untrusted repository"** warning because the manifest is not signed
-   with a Pleiades certificate; click *Continue* to proceed.
+   **"untrusted repository"** warning because the manifest is not
+   signed with a Pleiades certificate; click *Continue* to proceed.
 4. Restart PixInsight when prompted. The script appears in
-   `Script > AstroDL > Star Recompose`.
+   `Script > AstroDL Suite > Star Recompose Pro`.
 
 Future versions install automatically the next time you run
 `Check for Updates`.
-
-Optional: assign a keyboard shortcut from `Edit > Keyboard Shortcuts...`
-for one-key access.
 
 ## Usage
 
@@ -75,44 +110,28 @@ for one-key access.
    HistogramTransformation, ArcsinhStretch, your favourite recipe).
 3. Open the script. It auto-selects views whose ID matches
    `starless` / `stars` / `star_mask`.
-4. Adjust the sliders while watching the preview. Defaults
-   `Intensity 200 / Black Point 0 / Boost 1` are a sensible starting
-   point for typical linear stars-only data. The Intensity slider
-   spans 1 to 1000 and maps directly to PixInsight's
-   `ArcsinhStretch.stretch` value.
-5. (Optional) Tick **Save stretched stars** if you also want the
-   processed stars layer as a separate image.
-6. Click **Apply**. A new image (`Combined`) is created with the result.
+4. Adjust **Stretch** and **Color Boost** while watching the preview.
+   `Stretch = 100` and `Color Boost = 1.00` are a sensible starting
+   point for typical linear stars-only data.
+5. *(Optional)* Switch the Mask Tool to **Ellipse**, click+drag to
+   place the ellipse, and tune Strength / Feather / Gradient.
+6. *(Optional)* Tick **Create stars layer** if you also want the
+   processed stars as a separate output image.
+7. Click **Apply**. A new image (`Combined`) is created with the
+   result. If "Create stars layer" was on, `Stars_Stretched` is also
+   created.
 
-### Gradient mask editor
-
-Use the mask tools to hide stars over the gas of a galaxy, nebula or
-comet, so the recombined image shows the gas more clearly:
-
-- Pick a tool from the **Mask Tool** combo:
-  - **Ellipse** / **Rectangle**: drag on the preview to draw a shape.
-  - **Brush**: drag to paint freehand strokes.
-- **Mask Strength** controls how much the stars are attenuated where
-  the mask is painted: 0 = no effect, 1 = stars fully hidden.
-- **Mask Feather** sets the soft-edge width of new shapes (as a
-  percentage of the image width).
-- **Brush Radius** controls the brush size, also as a percentage of
-  the image width.
-- **Invert** flips the meaning: stars are kept only inside the painted
-  area and removed everywhere else.
-- **Clear Mask** wipes the mask back to zero.
-
-The painted area shows as a red overlay on the preview while you
-sculpt it. Apply uses the same mask at full resolution.
-
-### Saving presets as workspace icons
+## Saving presets as process icons
 
 Drag the blue **New Instance** triangle (bottom-left of the dialog) to
-the PixInsight workspace. PixInsight will save the current parameter
-values as a process icon. Rename it (right-click -> *Set Process
-Identifier...*) to something like `MANUAL_StarRecompose_NebulaPreset`.
-Re-open later by right-clicking the icon -> `Execute Globally`, or by
-double-clicking it and pressing the play button.
+the PixInsight workspace. PixInsight saves the current slider values
+and Output name as a process icon. Rename it
+(right-click &rarr; *Set Process Identifier...*) to something like
+`StarRecompose_NebulaPreset`. Re-open later by double-clicking the
+icon and pressing the play button.
+
+> Note: the ellipse geometry itself is not currently persisted across
+> sessions, but the sliders and SCNR / output settings are.
 
 ## License
 

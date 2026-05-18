@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.44"
+#define VERSION       "1.1.45"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -2787,18 +2787,22 @@ function PreviewFrame( parent )
    };
 
    // Map a hit-test mode string to a sensible PJSR standard cursor.
+   // Corner handles use the pointing hand to suggest "grab me"; the
+   // rotation handle uses the 4-way size cursor (PJSR does not ship a
+   // dedicated rotation cursor, this is the closest visual signal
+   // that the handle is interactive in a non-resize way).
    this._modeToCursor = function( mode )
    {
       switch ( mode )
       {
          case "resize-NW":
-         case "resize-SE": return StdCursor_SizeFDiag;
          case "resize-NE":
-         case "resize-SW": return StdCursor_SizeBDiag;
-         case "rotate":    return StdCursor_PointingHand;
+         case "resize-SE":
+         case "resize-SW": return StdCursor_PointingHand;
+         case "rotate":    return StdCursor_SizeAll;
          case "move":      return StdCursor_SizeAll;
       }
-      return StdCursor_Cross;
+      return StdCursor_Arrow;
    };
 
    // Hit-test (x,y) in canvas coords against the active shape's
@@ -3457,27 +3461,23 @@ function CombinerDialog()
    this.maskToolCombo.editEnabled = false;
    this.maskToolCombo.addItem( "Off / Pan view" );                  // 0
    this.maskToolCombo.addItem( "Ellipse (drag to draw oriented)" ); // 1
-   this.maskToolCombo.addItem( "Rectangle (drag to draw)" );        // 2
-   // NOTE: Brush and Eraser tools are temporarily hidden from the UI
-   // pending stability work (see GitHub issues). Internal support
-   // remains in the code.
    this.maskToolCombo.currentItem = 0;
    this.maskToolCombo.toolTip =
-      "Select a drawing tool. The mask reduces the contribution of the " +
-      "stars layer in painted areas, so gas / nebulosity from the " +
-      "starless shows through more clearly.\n" +
-      "Ellipse: first click + drag = ends of the major axis (auto-rotated).\n" +
-      "Rectangle: drag from one corner to the opposite corner.";
+      "Off / Pan view: just navigate the preview (drag to pan, " +
+      "mouse-wheel to zoom).\n" +
+      "Ellipse: click and drag to draw the ellipse. The first click " +
+      "and the drag endpoint define the two ends of the major axis " +
+      "(the shape auto-rotates). Once drawn, drag the corner handles " +
+      "to resize or the green handle to rotate.";
    this.maskToolCombo.onItemSelected = function( idx )
    {
-      var newTool = ["pan","ellipse","rect"][ idx ] || "pan";
-      // Single-shape model (v1.1.43+): switching tools does NOT
-      // auto-commit or discard the active shape. The shape persists
-      // and remains editable when the user switches back to a matching
-      // tool. To replace it the user clicks Clear Mask.
+      var newTool = ["pan","ellipse"][ idx ] || "pan";
+      // Single-shape model: switching tools does NOT auto-commit or
+      // discard the active shape. The shape persists and remains
+      // editable when the user switches back to Ellipse. To replace
+      // it the user clicks Clear Mask.
       data.maskTool = newTool;
       updateMaskRowsVisibility();
-      updateCommitButton();
       if ( self.previewFrame )
       {
          self.previewFrame.refreshCursor();
@@ -3486,36 +3486,17 @@ function CombinerDialog()
       scheduleUpdate();
    };
 
-   this.maskCommitBtn = new PushButton( this );
-   this.maskCommitBtn.text    = "Apply Edits";
-   this.maskCommitBtn.enabled = false;
-   this.maskCommitBtn.toolTip =
-      "Bake the current editable shape AND all pending brush strokes " +
-      "into the persistent mask, then clear them. Pending edits show " +
-      "in pink/cyan; committed mask shows in red.\n" +
-      "Shortcuts: ENTER = commit, ESC = discard shape, " +
-      "SHIFT+ESC = discard pending brush, DEL = clear all.";
-   this.maskCommitBtn.onClick = function()
-   {
-      if ( !hasPendingEdits() ) return;
-      commitAllPending();
-      updateCommitButton();
-      if ( self.previewFrame ) self.previewFrame.repaint();
-      scheduleUpdate();
-   };
-   // Single-shape model (v1.1.43+): this button is no longer wired
-   // into any sizer. Hide it explicitly so PJSR does not float the
-   // orphan widget at the dialog's top-left corner.
-   this.maskCommitBtn.hide();
+   // 'Apply Edits' button removed in v1.1.45 (single-shape model:
+   // the active ellipse IS the mask, no separate commit step needed).
 
    this.maskInvertCheck = new CheckBox( this );
    this.maskInvertCheck.text    = "Invert";
    this.maskInvertCheck.checked = data.maskInvert;
    this.maskInvertCheck.toolTip =
-      "When checked, the mask KEEPS stars only inside the painted area " +
-      "and removes them everywhere else - useful to keep stars only on " +
-      "a specific region (e.g. a galaxy core) and remove them around " +
-      "it. The active shape and brush ring show cyan in invert mode.";
+      "When checked, the mask KEEPS stars only inside the ellipse and " +
+      "removes them everywhere else - useful to keep stars only on a " +
+      "specific region (e.g. a galaxy core) and remove them around it. " +
+      "The active shape outline shows cyan in invert mode.";
    this.maskInvertCheck.onCheck = function( c )
    {
       data.maskInvert = c;
@@ -3550,14 +3531,12 @@ function CombinerDialog()
 
    this.maskClearBtn = new PushButton( this );
    this.maskClearBtn.text    = "Clear Mask";
-   this.maskClearBtn.toolTip = "Reset the mask and discard the editable shape: " +
-                               "stars are restored everywhere. Shortcut: DEL.";
+   this.maskClearBtn.toolTip = "Remove the current ellipse and reset the " +
+                               "mask. Stars are restored everywhere.";
    this.maskClearBtn.onClick = function()
    {
       discardActiveShape();
       clearMask();
-      clearMaskPending();
-      updateCommitButton();
       if ( self.previewFrame )
          self.previewFrame.repaint();
       scheduleUpdate();
@@ -3568,82 +3547,11 @@ function CombinerDialog()
    maskToolRow.add( maskToolLabel );
    maskToolRow.add( this.maskToolCombo, 100 );
    maskToolRow.add( this.maskInvertCheck );
-   // Apply Edits button removed in v1.1.43 (single-shape model: the
-   // active shape IS the mask, no separate commit step needed).
-   // maskToolRow.add( this.maskCommitBtn );
    maskToolRow.add( this.maskClearBtn );
 
-   // ---- Committed shapes manager: list + Edit + Delete ----
-   var shapesLabel = new Label( this );
-   shapesLabel.text          = "Shapes:";
-   shapesLabel.setFixedWidth( labelWidth );
-   shapesLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-
-   this.shapesCombo = new ComboBox( this );
-   this.shapesCombo.editEnabled = false;
-   this.shapesCombo.addItem( "(no committed shapes)" );
-   this.shapesCombo.enabled = false;
-   this.shapesCombo.toolTip =
-      "List of mask shapes you have committed so far. Select one and " +
-      "use Edit (load the shape back as the editable active shape) or " +
-      "Delete (remove the shape and rebuild the mask without it).";
-
-   this.shapeEditBtn = new PushButton( this );
-   this.shapeEditBtn.text    = "Edit";
-   this.shapeEditBtn.enabled = false;
-   this.shapeEditBtn.toolTip =
-      "Pull the selected shape out of the committed mask and load it " +
-      "as the active editable shape (with handles). Commit it again " +
-      "with Apply Edits, ENTER, or clicking outside.";
-   this.shapeEditBtn.onClick = function()
-   {
-      if ( data.activeShape != null )
-      {
-         // Auto-commit the in-progress shape so the user doesn't lose work.
-         commitActiveShape();
-         rebuildMaskOverlay();
-      }
-      var idx = self.shapesCombo.currentItem;
-      editShapeAt( idx );
-      rebuildMaskOverlay();
-      updateMaskRowsVisibility();
-      updateCommitButton();
-      if ( self.previewFrame )
-      {
-         self.previewFrame.refreshCursor();
-         self.previewFrame.repaint();
-      }
-      scheduleUpdate();
-   };
-
-   this.shapeDeleteBtn = new PushButton( this );
-   this.shapeDeleteBtn.text    = "Delete";
-   this.shapeDeleteBtn.enabled = false;
-   this.shapeDeleteBtn.toolTip =
-      "Remove the selected shape from the committed mask and rebuild " +
-      "the raster mask using only the shapes that remain. Does not " +
-      "affect the active editable shape.";
-   this.shapeDeleteBtn.onClick = function()
-   {
-      var idx = self.shapesCombo.currentItem;
-      deleteShapeAt( idx );
-      if ( self.previewFrame ) self.previewFrame.repaint();
-      scheduleUpdate();
-   };
-
-   var shapesRow = new HorizontalSizer;
-   shapesRow.spacing = 4;
-   shapesRow.add( shapesLabel );
-   shapesRow.add( this.shapesCombo, 100 );
-   shapesRow.add( this.shapeEditBtn );
-   shapesRow.add( this.shapeDeleteBtn );
-   // Single-shape model: this row is no longer added to leftPanel.
-   // Hide each widget so PJSR doesn't float the orphan controls at
-   // the dialog's top-left corner.
-   shapesLabel.hide();
-   this.shapesCombo.hide();
-   this.shapeEditBtn.hide();
-   this.shapeDeleteBtn.hide();
+   // Multi-shape manager (Shapes combo + Edit + Delete) and the
+   // 'Apply Edits' button were removed in v1.1.45. Single-shape model:
+   // the active ellipse IS the mask.
 
    // Quick "Compare" button: toggle Edit <-> Result so the user can
    // flip between with/without mask effect with a single click.
@@ -3913,8 +3821,8 @@ function CombinerDialog()
 
    leftPanel.add( makeSection( 3, "Mask (optional)",
                   "limit the stretch to a region. " +
-                  "Shortcuts: ESC = cancel ellipse, DEL = clear mask, " +
-                  "M = toggle compare. Mouse-wheel zooms; drag with Pan tool." ) );
+                  "Mouse-wheel zooms the preview; drag with Pan tool. " +
+                  "Drag handles to move/resize/rotate the ellipse." ) );
    leftPanel.add( maskToolRow );
    // Shapes manager row removed in v1.1.43 (single-shape model).
    // leftPanel.add( shapesRow );
@@ -3945,61 +3853,10 @@ function CombinerDialog()
    //   ESC    : discard the active shape (silently, without committing)
    //   ENTER  : commit the active shape (same as Commit Shape button)
    //   DELETE : clear the entire mask (same as Clear Mask button)
-   this.onKeyPress = function( keyCode, modifiers )
-   {
-      // NOTE: KeyModifier_Shift is NOT defined in some PJSR builds
-      // (caused a ReferenceError that crashed the dialog when ESC was
-      // pressed). Since brush is hidden in this release and the only
-      // modifier shortcut was SHIFT+ESC for pending brush strokes, we
-      // just dropped modifier handling entirely. If we re-add brush
-      // support later, use the literal 0x02000000 (Qt::ShiftModifier)
-      // or wrap the constant lookup in a try/catch.
-      var handled = false;
-      if ( keyCode === Key_Escape )
-      {
-         if ( data.activeShape != null )
-         {
-            discardActiveShape();
-            updateCommitButton();
-            if ( self.previewFrame ) self.previewFrame.repaint();
-            scheduleUpdate();
-            handled = true;
-         }
-      }
-      else if ( keyCode === Key_Return || keyCode === Key_Enter )
-      {
-         // No-op in single-shape model (nothing to commit). Kept for
-         // compatibility; if the user hits ENTER we simply do nothing.
-      }
-      else if ( keyCode === Key_Delete )
-      {
-         discardActiveShape();
-         clearMask();
-         clearMaskPending();
-         updateCommitButton();
-         if ( self.previewFrame ) self.previewFrame.repaint();
-         scheduleUpdate();
-         handled = true;
-      }
-      else if ( keyCode === Key_M )
-      {
-         // Toggle Edit <-> Result modes (quick before/after comparison).
-         if ( data.viewMode === "edit" )
-         {
-            data.viewMode = "result";
-            self.viewModeCombo.currentItem = 1;
-         }
-         else if ( data.viewMode === "result" )
-         {
-            data.viewMode = "edit";
-            self.viewModeCombo.currentItem = 0;
-         }
-         scheduleUpdate();
-         if ( self.previewFrame ) self.previewFrame.repaint();
-         handled = true;
-      }
-      return handled;
-   };
+   // Keyboard shortcuts were removed in v1.1.45. ESC, DEL, ENTER and M
+   // are no longer wired - the equivalent actions are the Clear Mask
+   // and Compare buttons. Removing the handler also fixes a crash
+   // caused by KeyModifier_Shift not being defined in this PJSR build.
 
    // Apply initial visibility / button state to match the default tool.
    updateMaskRowsVisibility();

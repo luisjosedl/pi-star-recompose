@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.45"
+#define VERSION       "1.1.46"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1378,6 +1378,87 @@ function bmpFillCircle( bmp, cx, cy, radius, fillColor, outlineColor )
 // negative int32, which PJSR's colour bridge sanitises to opaque
 // black - exactly the "outline still renders black" bug.
 // =====================================================================
+
+// =====================================================================
+// Custom rotation cursor (v1.1.46+).
+//
+// PJSR has no StdCursor_Rotate constant, and the closest standard
+// cursor (StdCursor_SizeAll, 4-way arrow) does not visually convey
+// "rotate this handle". We build a tiny 24x24 ARGB bitmap with a
+// 3/4-circle arc and a triangular arrowhead at the leading endpoint,
+// then wrap it in a Cursor object. Lazy-built once and cached for the
+// rest of the session; gracefully falls back to PointingHand if the
+// PJSR build can't construct the bitmap or cursor.
+// =====================================================================
+
+var __rotateCursor       = null;
+var __rotateCursorTried  = false;
+
+function getRotateCursor()
+{
+   if ( __rotateCursorTried ) return __rotateCursor;
+   __rotateCursorTried = true;
+   try {
+      var bmp = buildRotateCursorBitmap();
+      // Cursor( bitmap, hotspotX, hotspotY ): hotspot at center of bmp.
+      __rotateCursor = new Cursor( bmp, 12, 12 );
+   } catch ( e ) {
+      __rotateCursor = null;
+   }
+   return __rotateCursor;
+}
+
+function buildRotateCursorBitmap()
+{
+   var size = 24;
+   var bmp  = makeAlphaBitmap( size, size );
+   var cx   = 12, cy = 12;
+   var r    = 8;
+   var blk  = 0x7f000000;      // black with 50% alpha (positive int32)
+   var wht  = 0x7fffffff;      // white outline (positive int32)
+
+   // Stamp pixel with a 1-px white halo so the cursor is visible on
+   // both dark and light backgrounds.
+   function stamp( x, y )
+   {
+      plotPixel( bmp, x - 1, y    , wht );
+      plotPixel( bmp, x + 1, y    , wht );
+      plotPixel( bmp, x    , y - 1, wht );
+      plotPixel( bmp, x    , y + 1, wht );
+      plotPixel( bmp, x    , y    , blk );
+   }
+
+   // 3/4 circle arc: 30 deg to 300 deg (CCW), leaving a 90 deg gap on
+   // the lower-right where the arrowhead will sit.
+   for ( var deg = 30; deg <= 300; ++deg )
+   {
+      var rad = deg * Math.PI / 180;
+      var x = Math.round( cx + r * Math.cos( rad ) );
+      var y = Math.round( cy - r * Math.sin( rad ) );  // screen y inverted
+      stamp( x, y );
+   }
+
+   // Arrowhead at the 30 deg endpoint (upper-right of the arc), tip
+   // pointing DOWN along the tangent so it reads as "the arc continues
+   // around in this direction" = rotation.
+   //   Tangent CCW at 30 deg in screen coords: (sin30, cos30) = (0.5, 0.866)
+   //   That direction is down-right; the arrowhead tip extends along it.
+   // The triangle is filled as concentric rows from apex to base.
+   var ax = Math.round( cx + r * Math.cos( 30 * Math.PI / 180 ) );  // 19
+   var ay = Math.round( cy - r * Math.sin( 30 * Math.PI / 180 ) );  // 8
+   // Use a simple axis-aligned triangle pointing DOWN as a readable
+   // approximation of the tangent direction (good enough at 24x24).
+   var apexY = ay + 4;
+   for ( var dy = 0; dy <= 4; ++dy )
+   {
+      // Row at offset dy from apex: width grows from 0 (apex) to 3 (base).
+      var hw = Math.round( 3 * dy / 4 );
+      for ( var dx = -hw; dx <= hw; ++dx )
+         stamp( ax + dx + 1, apexY - dy );    // shift +1 so it sits to the right of the arc end
+   }
+
+   return bmp;
+}
 
 // Build polygon vertices around the perimeter of `s` in IMAGE/BITMAP
 // coordinates (same coordinate system the preview bitmap uses, so they
@@ -2778,19 +2859,35 @@ function PreviewFrame( parent )
 
    // Track current standard cursor id to avoid recreating Cursor() on
    // every mouse move (cheap but adds up at 60+ Hz of motion events).
+   // Sentinel value -42 means "use the custom rotate cursor"; PJSR
+   // standard cursor ids are non-negative so this never collides.
    this._lastCursorId = -999;
+   var ROTATE_CURSOR_ID = -42;
    this._setCursorId = function( stdId )
    {
       if ( self._lastCursorId === stdId ) return;
       self._lastCursorId = stdId;
+      if ( stdId === ROTATE_CURSOR_ID )
+      {
+         var rc = getRotateCursor();
+         if ( rc != null )
+         {
+            self.cursor = rc;
+            return;
+         }
+         // Fallback: custom-cursor build failed -> use PointingHand
+         // so the rotation handle still feels interactive.
+         self.cursor = new Cursor( StdCursor_PointingHand );
+         return;
+      }
       self.cursor = new Cursor( stdId );
    };
 
-   // Map a hit-test mode string to a sensible PJSR standard cursor.
-   // Corner handles use the pointing hand to suggest "grab me"; the
-   // rotation handle uses the 4-way size cursor (PJSR does not ship a
-   // dedicated rotation cursor, this is the closest visual signal
-   // that the handle is interactive in a non-resize way).
+   // Map a hit-test mode string to a sensible PJSR cursor. Corner
+   // handles use the pointing hand (universal "grab me" signal);
+   // the rotation handle uses a custom 24x24 bitmap cursor drawn as
+   // a 3/4-circle arrow (see buildRotateCursorBitmap above) since
+   // PJSR has no StdCursor_Rotate.
    this._modeToCursor = function( mode )
    {
       switch ( mode )
@@ -2799,7 +2896,7 @@ function PreviewFrame( parent )
          case "resize-NE":
          case "resize-SE":
          case "resize-SW": return StdCursor_PointingHand;
-         case "rotate":    return StdCursor_SizeAll;
+         case "rotate":    return ROTATE_CURSOR_ID;
          case "move":      return StdCursor_SizeAll;
       }
       return StdCursor_Arrow;

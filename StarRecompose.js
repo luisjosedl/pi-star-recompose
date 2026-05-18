@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.29"
+#define VERSION       "1.1.30"
 
 // Preview cache sizing. The cache is rebuilt to match the current preview
 // frame size (in physical pixels) so the image stays sharp when the dialog
@@ -1543,8 +1543,12 @@ function updatePreview()
    if ( __updating ) return;
    if ( ui == null || ui.previewFrame == null ) return;
 
-   if ( data.starlessSmall == null || data.starsSmall == null )
+   var hasStarless = (data.starlessSmall != null);
+   var hasStars    = (data.starsSmall    != null);
+
+   if ( !hasStarless && !hasStars )
    {
+      // Nothing loaded yet - show the placeholder.
       ui.previewFrame.setBitmap( null );
       return;
    }
@@ -1552,6 +1556,33 @@ function updatePreview()
    __updating = true;
    try
    {
+      // SINGLE-LAYER PREVIEW: show whichever layer is loaded so the
+      // user gets immediate feedback while picking the second view.
+      if ( hasStarless && !hasStars )
+      {
+         // Show the starless as-is (no processing needed).
+         ui.previewFrame.setBitmap( data.starlessSmall.mainView.image.render() );
+         return;
+      }
+      if ( hasStars && !hasStarless )
+      {
+         // Show the stretched stars layer so the user sees roughly
+         // what they'll get out of the stretch pipeline.
+         var stIm = data.starsSmall.mainView.image;
+         data.starsProc = ensureMatchingWindow( ID_STP_SMALL, stIm );
+         copyInto( ID_ST_SMALL, data.starsProc.mainView );
+         applyStretch( data.starsProc.mainView, data.stretchIntensity );
+         if ( stIm.numberOfChannels > 1 )
+         {
+            applyColorSat( data.starsProc.mainView, data.colorBoost );
+            if ( data.removeGreen )   applySCNRGreen( data.starsProc.mainView );
+            if ( data.removeMagenta ) applyMagentaRemoval( data.starsProc.mainView );
+         }
+         ui.previewFrame.setBitmap( data.starsProc.mainView.image.render() );
+         return;
+      }
+
+      // BOTH LAYERS - full combine pipeline (original behavior).
       ensureStarsSmallMatches();
       var slIm = data.starlessSmall.mainView.image;
       data.starsProc    = ensureMatchingWindow( ID_STP_SMALL, slIm );

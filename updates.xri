@@ -12,16 +12,60 @@
 -->
 <xri version="1.0">
    <description>
-      <p><b>AstroDL Suite</b> &mdash; astrophotography tools for PixInsight
-      by Luis Jose DL.</p>
-      <p>Currently includes <b>Star Recompose Pro</b>: recombine a
-      stretched starless image with a linear stars-only image, with a
-      live preview and an optional editable ellipse mask to limit the
-      stars stretch to a region.</p>
-      <p>Source: <a href="https://github.com/luisjosedl/pi-star-recompose">github.com/luisjosedl/pi-star-recompose</a></p>
+      <p><b>AstroDL Suite</b> &mdash; astrophotography tools for
+      PixInsight by Luis Jose DL.</p>
+      <p>Currently includes <b>Star Recompose Pro</b>: recombines a
+      stretched starless image with a linear stars-only image and
+      produces a single combined output. Built for the
+      StarXTerminator / StarNet++ workflow where the starless half is
+      stretched creatively while the stars half is hard to stretch
+      without blowing out the bright star cores.</p>
+      <p><b>Highlights</b></p>
+      <ul>
+         <li>Live embedded preview with mouse-wheel zoom and Pan-tool
+             drag. Loads either layer first and composites
+             automatically once both views are selected.</li>
+         <li>Per-channel rational stretch on the stars layer driven
+             by a single intensity slider, plus an independent Color
+             Boost saturation control that preserves color in bright
+             star cores instead of crushing them to white.</li>
+         <li>Optional SCNR Green and / or SCNR Magenta passes on the
+             stars layer to clean up residual color casts.</li>
+         <li>Optional editable <b>ellipse mask</b> to limit the stars
+             stretch to a region (e.g. only outside a galaxy or
+             nebula core). Click and drag to place, corner handles to
+             resize, green handle to rotate. The shape stays anchored
+             across window resizes; the cursor changes to a crosshair
+             over empty preview area, to a pointing hand over corner
+             handles, and to a rotation arrow over the green handle.</li>
+         <li>Configurable <b>Mask Strength</b>, <b>Feather</b> (soft
+             outer edge as % of image width) and <b>Gradient</b>
+             (solid mask=1 core radius). The dashed inner core
+             outline is rendered as a true offset curve and shrinks
+             smoothly across the full slider range.</li>
+         <li><b>Invert</b> mode keeps stars only inside the ellipse
+             and removes them everywhere else (outline shows in cyan
+             in this mode).</li>
+         <li>Three preview modes &mdash; Image only, Image + mask
+             effect (matches what Apply will produce), or Mask only
+             in black &amp; white &mdash; plus a one-click
+             <b>Compare</b> button to flip between with / without
+             the mask applied.</li>
+         <li><b>Apply</b> runs the full pipeline at the source views'
+             native resolution and creates a Combined image. An
+             optional second output keeps the stretched stars on
+             their own as a separate image, useful as a layer in
+             Photoshop or GIMP.</li>
+         <li>Drag the blue <b>New Instance</b> triangle (bottom-left
+             of the dialog) to the PixInsight workspace to save the
+             current slider values as a process icon. Re-open later
+             with a double-click for one-click reuse on future
+             images.</li>
+      </ul>
+      <p>MIT License. Free for personal and commercial use.</p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.2.0.tar.gz"
+      <package fileName="pkg/AstroDL-StarRecompose-1.2.1.tar.gz"
                sha1="0000000000000000000000000000000000000000"
                type="script"
                releaseDate="20260516">

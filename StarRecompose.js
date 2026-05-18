@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.46"
+#define VERSION       "1.1.47"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -1496,6 +1496,45 @@ function shapePerimeterPoints( s, N )
    return pts;
 }
 
+// True parallel / offset curve of an ellipse: for each of N samples
+// along the perimeter, take the local outward normal (the implicit
+// ellipse function f(P) = (Px/rx)^2 + (Py/ry)^2 has gradient
+// (2Px/rx^2, 2Py/ry^2), which is normal to the perimeter), normalise
+// it, and step INWARD by insetDist pixels. Unlike a uniformly scaled
+// ellipse, the resulting curve maintains a constant perpendicular
+// distance from the original perimeter - exactly what the user wants
+// the dashed inner core indicator to look like.
+function ellipseOffsetCurve( s, insetDist, N )
+{
+   var pts = [];
+   var co  = Math.cos( s.angle );
+   var si  = Math.sin( s.angle );
+   var rx2 = s.rx * s.rx;
+   var ry2 = s.ry * s.ry;
+   for ( var i = 0; i < N; ++i )
+   {
+      var t  = (i / N) * 2 * Math.PI;
+      var lx = s.rx * Math.cos( t );
+      var ly = s.ry * Math.sin( t );
+      // Implicit-form gradient -> outward normal direction.
+      var nx = lx / rx2;
+      var ny = ly / ry2;
+      var nlen = Math.sqrt( nx*nx + ny*ny );
+      if ( nlen < 1e-9 ) continue;
+      nx /= nlen;
+      ny /= nlen;
+      // Move inward by insetDist along the unit normal.
+      var ix = lx - nx * insetDist;
+      var iy = ly - ny * insetDist;
+      // Rotate from the ellipse's local frame back to bitmap coords.
+      pts.push( {
+         x: s.cx + ix * co - iy * si,
+         y: s.cy + ix * si + iy * co
+      } );
+   }
+   return pts;
+}
+
 // Stamp the active shape outline + handles AND all committed shapes'
 // thin outlines onto `bmp`. Mutates `bmp` in place. Safe to call with
 // a null or invalid bitmap.
@@ -1550,24 +1589,28 @@ function stampShapeOutlinesOnBitmap( bmp )
       bmpStrokeClosedPath( bmp, apts, aShadow, 5, false );
       bmpStrokeClosedPath( bmp, apts, aMain,   2, false );
 
-      // Inner "core" contour (dashed): shows where the solid mask=1
-      // zone ends inside an ellipse with feather > 0.
+      // Inner "core" contour (dashed): visual guide for the solid
+      // mask=1 zone inside an ellipse with feather > 0.
+      //
+      // v1.1.47: replaced the scaled-down ellipse (rx*gc, ry*gc) with
+      // a true OFFSET CURVE - the inner outline now sits at a UNIFORM
+      // pixel distance from the outer perimeter, instead of a smaller
+      // gap on the minor axis and a larger gap on the major axis.
+      // The inset distance maps the gradientCenter slider to pixels
+      // as (1 - gc) * min(rx, ry), capped so the inner curve never
+      // collapses past the centre.
       var gcShape = (s.gradientCenter != null)
                   ? s.gradientCenter : data.maskGradientCtr;
-      if ( s.type === "ellipse" && gcShape < 0.99
-        && gcShape * Math.min( s.rx, s.ry ) >= 2.0 )
+      if ( s.type === "ellipse" && gcShape < 0.99 )
       {
-         var coreS = {
-            type: "ellipse",
-            cx: s.cx, cy: s.cy,
-            rx: s.rx * gcShape, ry: s.ry * gcShape,
-            angle: s.angle,
-            feather: s.feather,
-            gradientCenter: s.gradientCenter
-         };
-         var cppts = shapePerimeterPoints( coreS, 64 );
-         bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
-         bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
+         var minR = Math.min( s.rx, s.ry );
+         var insetPx = Math.min( minR - 2, (1 - gcShape) * minR );
+         if ( insetPx >= 2 )
+         {
+            var cppts = ellipseOffsetCurve( s, insetPx, 64 );
+            bmpStrokeClosedPath( bmp, cppts, aShadow, 3, true );
+            bmpStrokeClosedPath( bmp, cppts, aMain,   1, true );
+         }
       }
 
       // Handles: 4 corner resize + 1 rotation handle above the top.

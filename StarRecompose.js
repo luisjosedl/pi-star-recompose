@@ -69,7 +69,7 @@
 #define BRAND_SUITE   "AstroDL Suite"
 #define TOOL          "Star Recompose Pro"
 #define TITLE         "Star Recompose Pro"
-#define VERSION       "1.1.36"
+#define VERSION       "1.1.37"
 
 // Set to 1 to log every preview setBitmap with bitmap stats. Used to
 // hunt down the "preview goes black on click" complaint. Switch off
@@ -2286,10 +2286,16 @@ function PreviewFrame( parent )
                console.writeln(
                   "[paint] drawing active shape outline via gfx fillRect" );
 
-            var shadowColor = argb( 0xff, 0, 0, 0 );           // black
+            // ARGB color literals with alpha >= 0x80 become > 2^31 in
+            // JavaScript and PJSR's Brush color setter sanitizes them
+            // to opaque black. Stay in the positive int32 range with
+            // alpha 0x7f - the outline is still very visible on top of
+            // the preview (and we draw the colored stroke over a wider
+            // black shadow stroke for contrast against bright nebulae).
+            var shadowColor = argb( 0x7f, 0, 0, 0 );           // black
             var mainColor   = data.maskInvert
-                            ? argb( 0xff, 0x00, 0xcc, 0xff )   // cyan
-                            : argb( 0xff, 0xff, 0x00, 0x00 );  // RED
+                            ? argb( 0x7f, 0x00, 0xcc, 0xff )   // cyan
+                            : argb( 0x7f, 0xff, 0x00, 0x00 );  // RED
 
             // Main outline: shadow + colored stroke.
             gfxStrokeClosedPath( g, pts, shadowColor, 4, false );
@@ -2317,13 +2323,15 @@ function PreviewFrame( parent )
             }
 
             // Draw the 4 corner handles + the rotation handle.
+            // Alpha 0x7f to stay in positive int32 (see shadowColor
+            // comment above) so the Brush honors the requested color.
             var handles = getActiveShapeHandles();
             var handleFill    = data.maskInvert
-                              ? argb( 0xff, 0x00, 0xcc, 0xff )
-                              : argb( 0xff, 0xff, 0x00, 0x00 );
-            var handleOutline = argb( 0xff, 0xff, 0xff, 0xff );  // white
-            var rotFill       = argb( 0xff, 0x22, 0xaa, 0x22 );  // green
-            var rotOutline    = argb( 0xff, 0xff, 0xff, 0xff );
+                              ? argb( 0x7f, 0x00, 0xcc, 0xff )
+                              : argb( 0x7f, 0xff, 0x00, 0x00 );
+            var handleOutline = argb( 0x7f, 0xff, 0xff, 0xff );  // white
+            var rotFill       = argb( 0x7f, 0x22, 0xaa, 0x22 );  // green
+            var rotOutline    = argb( 0x7f, 0xff, 0xff, 0xff );
 
             for ( var h = 0; h < handles.length; ++h )
             {

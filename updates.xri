@@ -65,8 +65,8 @@
       <p>MIT License. Free for personal and commercial use.</p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.3">
-      <package fileName="pkg/AstroDL-StarRecompose-1.2.1.tar.gz"
-               sha1="c9ff25c69d6df51404bdb788b579eea917d27272"
+      <package fileName="pkg/AstroDL-StarRecompose-1.2.2.tar.gz"
+               sha1="13d2bcfa0e5dbc0cdfb1a68512a85a84e25cb7af"
                type="script"
                releaseDate="20260518">
          <title>Star Recompose Pro</title>
